@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; manifest-src 'self'; connect-src 'self' https://api.lunchmoney.dev https://openrouter.ai; base-uri 'self'; form-action 'none'; object-src 'none'">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#2a6b64">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="./app.css">
+<title>dopo</title>
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">dopo</div>
+  <div class="streak" id="streak" hidden aria-label="streak">🔥<span id="streakN">0</span></div>
+  <button class="chip" id="laterChip" hidden>💤 Later · <span id="laterN">0</span></button>
+  <div class="menu">
+    <button id="menuBtn" aria-label="Menu" aria-haspopup="true">⋯</button>
+    <div class="menu-pop" id="menuPop" hidden>
+      <a href="./table.html">Table &amp; rules</a>
+      <button id="menuAccounts">Accounts…</button>
+      <button id="menuSettings">Settings</button>
+      <button id="menuRefresh">Refresh deck</button>
+    </div>
+  </div>
+</header>
+
+<div class="progress" role="progressbar" aria-label="Set progress">
+  <div class="progress-fill" id="progressFill"></div>
+</div>
+<div class="meter" id="meter">loading…</div>
+
+<main class="stage" id="stage">
+  <div class="stack" id="stack" aria-live="polite"></div>
+</main>
+
+<div class="webbar" id="webBar" hidden data-mode="hint">
+  <button id="webBarBtn" type="button"></button>
+</div>
+
+<div class="actions" id="actions">
+  <button class="act act-park" id="btnPark" aria-label="Park for later (ArrowLeft)">💤<span>Later</span></button>
+  <button class="act act-pick" id="btnPick" aria-label="Pick category (Enter)">🗂<span>Pick</span></button>
+  <button class="act act-accept" id="btnAccept" aria-label="Accept suggestion (ArrowRight)">✓<span>Sort it</span></button>
+</div>
+
+<div class="note" id="note" hidden></div>
+
+<div class="undo-toast" id="undoToast" hidden>
+  <div class="undo-row">
+    <span class="undo-text" id="undoText"></span>
+    <button class="undo-btn" id="undoBtn">Undo <kbd>U</kbd></button>
+  </div>
+  <button class="rule-chip" id="ruleChip" hidden></button>
+</div>
+
+<div class="sheet-backdrop" id="sheetBackdrop" hidden></div>
+
+<div class="sheet" id="pickSheet" role="dialog" aria-modal="true" aria-label="Pick a category" tabindex="-1" hidden>
+  <div class="grabber"></div>
+  <div class="sheet-head">
+    <div class="sheet-title" id="pickTitle">Pick a category</div>
+    <button class="sheet-close" id="pickClose" aria-label="Cancel">✕</button>
+  </div>
+  <div class="sheet-body" id="pickBody"></div>
+</div>
+
+<div class="sheet" id="acctSheet" role="dialog" aria-modal="true" aria-label="Accounts in the deck" tabindex="-1" hidden>
+  <div class="grabber"></div>
+  <div class="sheet-head">
+    <div class="sheet-title">Accounts in the deck</div>
+    <button class="sheet-close" id="acctClose" aria-label="Close">✕</button>
+  </div>
+  <div class="sheet-body" id="acctBody"></div>
+</div>
+
+<div class="sheet" id="laterSheet" role="dialog" aria-modal="true" aria-label="Parked for later" tabindex="-1" hidden>
+  <div class="grabber"></div>
+  <div class="sheet-head">
+    <div class="sheet-title">Parked for later</div>
+    <button class="sheet-close" id="laterClose" aria-label="Close">✕</button>
+  </div>
+  <div class="sheet-body" id="laterBody"></div>
+</div>
+
+<div class="sheet" id="settingsSheet" role="dialog" aria-modal="true" aria-label="Settings" tabindex="-1" hidden>
+  <div class="grabber"></div>
+  <div class="sheet-head">
+    <div class="sheet-title">Settings</div>
+    <button class="sheet-close" id="settingsClose" aria-label="Close">✕</button>
+  </div>
+  <div class="sheet-body">
+    <div class="sheet-section">Tokens</div>
+    <div class="settings-info">Tokens are stored only in this browser and sent only to
+      Lunch Money and OpenRouter — never to the host serving this page.</div>
+    <div class="field">
+      <label class="field-label" for="lmTokenInput">Lunch Money API token</label>
+      <input class="field-input" id="lmTokenInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste token">
+      <div class="field-sub">Required. Create one at
+        <a href="https://my.lunchmoney.app/developers" target="_blank" rel="noopener">my.lunchmoney.app/developers</a>
+        — it has full account access, treat it like a bank password.</div>
+      <div class="field-hint" id="lmTokenHint" hidden></div>
+      <div class="field-error" id="lmTokenError" hidden></div>
+    </div>
+    <div class="field">
+      <label class="field-label" for="orTokenInput">OpenRouter API key</label>
+      <input class="field-input" id="orTokenInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste key">
+      <div class="field-sub">Optional — enables AI suggestions. Create a dedicated key with a
+        spend limit at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</div>
+      <div class="field-hint" id="orTokenHint" hidden></div>
+      <div class="field-error" id="orTokenError" hidden></div>
+    </div>
+    <div class="settings-info" id="budgetLine" hidden></div>
+    <div class="settings-info" id="webCheckLine" hidden></div>
+    <div class="sheet-section">App badge</div>
+    <label class="toggle-row">
+      <input type="checkbox" id="badgeToggle">
+      <span class="toggle-text">Badge on the app icon
+        <span class="toggle-sub">Shows how many cards were left to sort when you last closed dopo.</span>
+      </span>
+    </label>
+    <div class="field-error" id="settingsError" hidden></div>
+    <button class="save-btn" id="settingsSave" type="button">Save</button>
+    <button class="forget-btn" id="forgetBtn" type="button" hidden>Forget tokens on this device</button>
+  </div>
+</div>
+
+<div class="onboard" id="onboardCard" hidden>
+  <div class="onboard-card">
+    <div class="onboard-emoji">🔌</div>
+    <h2>Connect Lunch Money</h2>
+    <p>dopo sorts your Lunch Money transactions right here in the browser. Your tokens stay
+      on this device and go only to Lunch Money and OpenRouter — there is no server.</p>
+    <ol class="onboard-steps">
+      <li>Create a <a href="https://my.lunchmoney.app/developers" target="_blank" rel="noopener">Lunch&nbsp;Money API token</a> (required).</li>
+      <li>Optionally create an <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">OpenRouter key</a> for AI suggestions — use a dedicated key with a spend limit.</li>
+    </ol>
+    <button id="onboardOpen">Paste tokens</button>
+  </div>
+</div>
+
+<div class="update-toast" id="updateToast" hidden>
+  <span>New version</span>
+  <button class="update-btn" id="updateBtn">Update</button>
+</div>
+
+<div class="celebrate" id="celebrate" hidden>
+  <div class="celebrate-card">
+    <div class="celebrate-emoji" id="celebrateEmoji">🎉</div>
+    <div class="celebrate-title" id="celebrateTitle"></div>
+    <div class="celebrate-sub" id="celebrateSub"></div>
+    <button class="celebrate-btn" id="celebrateBtn" hidden>Keep going</button>
+  </div>
+</div>
+
+<canvas id="confetti"></canvas>
+
+<script type="module" src="./app.js"></script>
+<script type="module" src="./boot.js"></script>
+</body>
+</html>

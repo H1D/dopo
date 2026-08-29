@@ -1,0 +1,17 @@
+[
+  {
+    "transactions": [
+      { "id": 1, "date": "2026-01-03", "amount": "12.50", "currency": "eur", "payee": "BCK*ALBERT HEIJN 1573 AMSTERDAM NLD", "category_id": null, "notes": null, "status": "unreviewed", "is_pending": false, "plaid_account_id": 11, "manual_account_id": null },
+      { "id": 2, "date": "2026-01-04", "amount": "3.20", "currency": "eur", "payee": "Zettle_*De Koffiezaak AMSTERDAM", "category_id": null, "notes": null, "status": "unreviewed", "is_pending": false, "plaid_account_id": 11, "manual_account_id": null },
+      { "id": 3, "date": "2026-01-05", "amount": "45.00", "currency": "eur", "payee": "Already Sorted BV", "category_id": 101, "notes": null, "status": "reviewed", "is_pending": false, "plaid_account_id": 11, "manual_account_id": null },
+      { "id": 4, "date": "2026-01-05", "amount": "9.99", "currency": "eur", "payee": "Pending Store", "category_id": null, "notes": null, "status": "unreviewed", "is_pending": true, "plaid_account_id": 11, "manual_account_id": null }
+    ],
+    "has_more": true
+  },
+  {
+    "transactions": [
+      { "id": 5, "date": "2026-01-06", "amount": "120.00", "currency": "eur", "payee": "To Van Dijk Incasso B.V. via Stichting Mollie Payments - 79bd8a Dossier 1234567", "category_id": null, "notes": "invoice", "status": "unreviewed", "is_pending": false, "plaid_account_id": null, "manual_account_id": 7 }
+    ],
+    "has_more": false
+  }
+]

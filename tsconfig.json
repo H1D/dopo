@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleDetection": "force",
+    "moduleResolution": "bundler",
+    "types": ["bun"],
+
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+
+    "strict": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true
+  },
+  // sw.js is excluded: it runs in the ServiceWorker global scope, which clashes
+  // with the DOM lib the page modules need. It is still covered by the CI static
+  // checks (precache drift, version placeholder) in scripts/ci-checks.ts.
+  "include": ["public/**/*.js", "scripts/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["public/sw.js"]
+}

@@ -1,0 +1,8 @@
+{
+  "transactions": [
+    { "id": 0, "date": "2026-02-01", "amount": "5.00", "currency": "eur", "payee": "SumUp *Bakkerij Jansen AMSTERDAM NL", "category_id": null, "notes": null, "status": "unreviewed", "is_pending": false, "plaid_account_id": 11, "manual_account_id": null },
+    { "id": 0, "date": "2026-02-02", "amount": "7.00", "currency": "eur", "payee": "CCV*STATION AMSTERDAM", "category_id": null, "notes": null, "status": "unreviewed", "is_pending": false, "plaid_account_id": 11, "manual_account_id": null }
+  ],
+  "has_more": true,
+  "total": 12345
+}

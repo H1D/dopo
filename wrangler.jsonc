@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dopo-classifier",
+  "compatibility_date": "2026-08-28",
+  "workers_dev": false,
+  "preview_urls": false,
+  // Assets-only Worker: no main, no D1, no crons, no vars, no secrets.
+  // Family deploy: `bun scripts/stamp-sw.ts && bunx wrangler deploy`
+  // (the stamp script writes dist/ with __DOPO_VERSION__ replaced in sw.js).
+  "assets": {
+    "directory": "./dist"
+  },
+  "routes": [
+    { "pattern": "dopo.artems.net", "custom_domain": true }
+  ]
+}

@@ -1,0 +1,9 @@
+# gitleaks config — default rules.
+# .env / .dev.vars are gitignored; if one ever gets force-staged, gitleaks SHOULD flag it.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Cloudflare Access AUD tags are public application identifiers, not secrets"
+regexTarget = "line"
+regexes = ['''ACCESS_APP_AUD''']

@@ -1,0 +1,8 @@
+{
+  "plaid_accounts": [
+    { "id": 11, "name": "checking", "display_name": "ABN AMRO Betaalrekening", "institution_name": "ABN AMRO", "mask": "1234", "type": "depository" }
+  ],
+  "manual_accounts": [
+    { "id": 7, "name": "Cash wallet", "display_name": null, "institution_name": null, "mask": null, "type": "cash" }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "categories": [
+    {
+      "id": 100,
+      "name": "🍎 Food",
+      "description": null,
+      "is_group": true,
+      "group_id": null,
+      "exclude_from_budget": false,
+      "exclude_from_totals": false,
+      "children": [
+        { "id": 101, "name": "🛒 Groceries", "description": null, "is_group": false, "group_id": 100, "exclude_from_budget": false, "exclude_from_totals": false },
+        { "id": 102, "name": "☕ Coffee & Snacks", "description": null, "is_group": false, "group_id": 100, "exclude_from_budget": false, "exclude_from_totals": false }
+      ]
+    },
+    { "id": 200, "name": "🚆 Transport", "description": null, "is_group": false, "group_id": null, "exclude_from_budget": false, "exclude_from_totals": false }
+  ]
+}
