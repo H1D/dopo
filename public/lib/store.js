@@ -9,9 +9,10 @@
  *   - Later pile POINTERS  dopo.later.v1   (ids; legacy full-txn entries still accepted)
  *   - rules                dopo.rules.v1
  *
- * IndexedDB (bulk, async): suggestion cache + Later txn bodies, ~2000-entry LRU,
- * per-entry writes. Falls back to an in-memory Map (same API, session-only) when
- * IndexedDB is unavailable or breaks mid-flight — the app must never brick on storage.
+ * IndexedDB (bulk, async): suggestion cache + Later txn bodies (~2000-entry LRU,
+ * per-entry writes) + the offline state snapshot. Falls back to in-memory Maps
+ * (same API, session-only) when IndexedDB is unavailable or breaks mid-flight —
+ * the app must never brick on storage.
  *
  * Everything is shape-validated on read (lsLoad-style): corrupted storage degrades
  * to the fallback value; read paths never throw. WRITE paths throw on quota /
@@ -119,6 +120,9 @@ export function clearTokens() {
  *   decision was made against. Legacy items (server era) lack it — normalized to null,
  *   which never equals a live snapshot: they are "old session" and only ever flush
  *   through the recheck-based replay path, never the keepalive hidden flush.
+ * @property {string} [stuck]  reason a poison item was parked with flushable:false
+ *   after repeated rejected PUTs (lib/sync.js). Optional — absent on healthy items,
+ *   so the dopo.queue.v1 format stays back-compatible.
  */
 
 /** @returns {QueueItem[]} */
@@ -140,6 +144,7 @@ export function queueLoad() {
       sent: o.sent === true,
       snapshotTs: typeof o.snapshotTs === "number" ? o.snapshotTs : null,
     };
+    if (typeof o.stuck === "string") item.stuck = o.stuck;
     if (
       typeof o.make_rule === "object" &&
       o.make_rule !== null &&
@@ -165,15 +170,72 @@ export function queueSave(queue) {
 }
 
 /**
- * Items safe for the hidden/pagehide keepalive flush: flushable AND decided against
- * the CURRENT session's snapshot. Old-session items (including legacy null) stay
- * queued for the recheck-based replay on next open.
- * @param {QueueItem[]} queue
- * @param {number|null} currentSnapshotTs
+ * Collapse duplicate ids — max ts wins. Two tabs queuing the same txn with
+ * different categories must never produce one PUT body with duplicate ids.
+ * First-occurrence order per id is preserved.
+ * @param {QueueItem[]} items
  * @returns {QueueItem[]}
  */
-export function keepaliveEligible(queue, currentSnapshotTs) {
+function queueCollapse(items) {
+  /** @type {Map<number, QueueItem>} */
+  const byId = new Map();
+  for (const it of items) {
+    const prev = byId.get(it.id);
+    if (!prev || it.ts >= prev.ts) byId.set(it.id, it);
+  }
+  return [...byId.values()];
+}
+
+/**
+ * Slow-path queue writes (replay, table bulk push, interactive-flush persistence
+ * steps) — multi-step read-modify-write under `navigator.locks` "dopo.queue".
+ * Decision-path writes (decide/undo/pagehide) stay synchronous inline merges and
+ * must NOT come through here (async lock callbacks may never run in teardown).
+ *
+ * `fn` MUST be synchronous (no awaits between load and save — the no-locks
+ * fallback would reintroduce the clobber otherwise). It receives the FRESH
+ * queue; return a replacement array, or mutate in place and return undefined.
+ * Item identity is (id, ts): mutate by lookup on the fresh array, never through
+ * stale object references. Fallback without navigator.locks (older Safari, bun
+ * tests): run fn unlocked but still fresh-read-merged.
+ *
+ * NEVER hold this lock across network I/O — lock per persistence step.
+ *
+ * @param {(queue: QueueItem[]) => QueueItem[]|void} fn
+ * @returns {Promise<QueueItem[]>} the collapsed queue as saved
+ * @throws on storage failure (quota / private mode), like queueSave
+ */
+export async function queueMutate(fn) {
+  const run = () => {
+    const fresh = queueLoad();
+    const ret = fn(fresh);
+    const next = queueCollapse(Array.isArray(ret) ? ret : fresh);
+    queueSave(next);
+    return next;
+  };
+  const hasLocks =
+    typeof navigator !== "undefined" && navigator.locks && typeof navigator.locks.request === "function";
+  if (hasLocks) return navigator.locks.request("dopo.queue", async () => run());
+  return run();
+}
+
+/** Snapshot freshness bound for the keepalive flush: 2 * the 5-min refresh cadence. */
+export const KEEPALIVE_SNAPSHOT_FRESH_MS = 10 * 60 * 1000;
+
+/**
+ * Items safe for the hidden/pagehide keepalive flush: flushable AND decided against
+ * the CURRENT session's snapshot AND that snapshot is fresh (< 10 min old — a sheet
+ * left open all afternoon must not skip the recheck on stale eligibility).
+ * Old-session items (including legacy null) stay queued for the recheck-based
+ * replay on next open.
+ * @param {QueueItem[]} queue
+ * @param {number|null} currentSnapshotTs
+ * @param {number} [now]
+ * @returns {QueueItem[]}
+ */
+export function keepaliveEligible(queue, currentSnapshotTs, now = Date.now()) {
   if (currentSnapshotTs === null) return [];
+  if (now - currentSnapshotTs >= KEEPALIVE_SNAPSHOT_FRESH_MS) return [];
   return queue.filter((it) => it.flushable && it.snapshotTs === currentSnapshotTs);
 }
 
@@ -198,12 +260,22 @@ export function rulesSave(rules) {
 
 /**
  * Append one rule; assigns a device-unique id + created_at when absent.
+ * Dedupes by (pattern case-insensitive, match_type, category_id): replaying the
+ * same make_rule twice (or from two tabs) returns the EXISTING rule, no write.
  * @param {{pattern: string, match_type?: "contains"|"exact", category_id: number, id?: number, category_name?: string}} rule
  * @returns {import("./rules.js").Rule}
  * @throws on storage failure
  */
 export function ruleAdd(rule) {
   const existing = rulesLoad();
+  const mt = rule.match_type === "exact" ? "exact" : "contains";
+  const dup = existing.find(
+    (r) =>
+      r.pattern.toLowerCase() === rule.pattern.toLowerCase() &&
+      r.match_type === mt &&
+      r.category_id === rule.category_id,
+  );
+  if (dup) return dup;
   /** @type {import("./rules.js").Rule} */
   const full = {
     id: typeof rule.id === "number" ? rule.id : Date.now() + Math.floor(Math.random() * 1000),
@@ -259,13 +331,19 @@ export function saveLaterIds(ids) {
  * Legacy full-txn entries are migrated (bodies moved to IndexedDB, pointers kept).
  * Bodies evicted by the browser are dropped along with their pointers — losing a
  * parked card body is survivable; a phantom pointer is not.
+ *
+ * Pointer compaction is FORBIDDEN when any later op fell back to memory this
+ * session (memory-only mode included): a body that merely couldn't be READ is not
+ * a body that is gone, and compacting on it would wipe the pile.
  * @returns {Promise<(Record<string, unknown> & {id: number})[]>}
  */
 export async function laterLoad() {
   const { ids, legacyTxns } = loadLater();
   for (const t of legacyTxns) await laterPut(t);
   const bodies = await laterGetAll(ids);
-  if (bodies.length !== ids.length || legacyTxns.length) {
+  // evaluate AFTER the reads/migration above — they may have tripped the flag
+  const canCompact = !memoryOnly && !laterFellBack;
+  if (canCompact && (bodies.length !== ids.length || legacyTxns.length)) {
     try {
       saveLaterIds(bodies.map((t) => t.id));
     } catch {
@@ -304,24 +382,41 @@ export function laterRemove(id) {
 // ---------------------------------------------------------------------------
 
 const DB_NAME = "dopo";
-const DB_VERSION = 1;
+// v2 adds the offline state snapshot store; v1 stores carry over untouched.
+const DB_VERSION = 2;
 const SUG_STORE = "suggestions";
 const LATER_STORE = "later";
+const SNAP_STORE = "snapshot";
+const SNAP_KEY = "state";
 /** ~2000 entries keeps the cache well under any browser quota while covering months. */
 export const CACHE_MAX_ENTRIES = 2000;
+/** Per-op watchdog: a v1→v2 upgrade blocked by another open tab must degrade the
+ *  CALL, not the session — see dbForOp(). */
+const OP_TIMEOUT_MS = 2000;
 
 let cacheMax = CACHE_MAX_ENTRIES;
+let opTimeoutMs = OP_TIMEOUT_MS;
 /**
- * Test hook / tuning. @param {{maxEntries?: number}} opts
+ * Test hook / tuning. @param {{maxEntries?: number, opTimeoutMs?: number}} opts
  */
 export function configureCache(opts) {
   if (typeof opts.maxEntries === "number" && opts.maxEntries > 0) cacheMax = opts.maxEntries;
+  if (typeof opts.opTimeoutMs === "number" && opts.opTimeoutMs > 0) opTimeoutMs = opts.opTimeoutMs;
 }
 
 /** Session-only fallback. Map iteration order doubles as LRU order (touch = re-insert). */
 const memSug = /** @type {Map<string, {value: unknown, ts: number}>} */ (new Map());
 const memLater = /** @type {Map<number, Record<string, unknown> & {id: number}>} */ (new Map());
+/** @type {(Record<string, unknown> & {transactions: unknown[]})|null} in-memory snapshot record */
+let memSnap = null;
 let memoryOnly = false;
+/**
+ * Sticky session flag: some later-store op already fell back to memory this
+ * session (timeout OR memory-only). While set, laterLoad's pointer compaction is
+ * FORBIDDEN — "couldn't reach IDB" must never be treated as "IDB confirmed gone",
+ * or a transient stall wipes the Later pile.
+ */
+let laterFellBack = false;
 /** @type {Promise<IDBDatabase|null>|null} */
 let dbPromise = null;
 
@@ -330,8 +425,21 @@ export function cacheIsMemoryOnly() {
   return memoryOnly;
 }
 
+/** Test hook: back to a pristine module state (fresh open, empty fallbacks, defaults). */
+export function resetStorageForTests() {
+  memoryOnly = false;
+  laterFellBack = false;
+  dbPromise = null;
+  memSug.clear();
+  memLater.clear();
+  memSnap = null;
+  cacheMax = CACHE_MAX_ENTRIES;
+  opTimeoutMs = OP_TIMEOUT_MS;
+}
+
 /**
- * Open (once). Any failure flips the module into memory-only mode.
+ * Open (once). Open errors flip the module into memory-only mode; a BLOCKED open
+ * does NOT — the promise simply stays pending (see dbForOp's per-call timeout).
  * @returns {Promise<IDBDatabase|null>}
  */
 function openDb() {
@@ -353,15 +461,28 @@ function openDb() {
         if (!db.objectStoreNames.contains(LATER_STORE)) {
           db.createObjectStore(LATER_STORE, { keyPath: "id" });
         }
+        if (!db.objectStoreNames.contains(SNAP_STORE)) {
+          db.createObjectStore(SNAP_STORE, { keyPath: "key" });
+        }
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        const db = req.result;
+        // Another tab is upgrading to a newer version: close so IT can proceed;
+        // this tab reopens lazily on its next op.
+        db.onversionchange = () => {
+          db.close();
+          dbPromise = null;
+        };
+        resolve(db);
+      };
       req.onerror = () => {
         memoryOnly = true;
         resolve(null);
       };
       req.onblocked = () => {
-        memoryOnly = true;
-        resolve(null);
+        // Deliberately NO memory-only latch and NO resolve(null): blocked means an
+        // old tab still holds v1 open. The promise stays cached and PENDING; each
+        // op times out individually and uses the real DB once the open resolves.
       };
     } catch {
       memoryOnly = true;
@@ -372,7 +493,29 @@ function openDb() {
 }
 
 /**
- * Run one small IDB transaction; on ANY failure degrade to memory-only and return null.
+ * openDb raced against the per-call watchdog. A timeout degrades THIS call to the
+ * memory path (returns null) without poisoning the cached open promise and without
+ * latching memory-only mode.
+ * @returns {Promise<IDBDatabase|null>}
+ */
+async function dbForOp() {
+  /** @type {ReturnType<typeof setTimeout>|undefined} */
+  let timer;
+  try {
+    return await Promise.race([
+      openDb(),
+      new Promise((/** @type {(v: null) => void} */ resolve) => {
+        timer = setTimeout(() => resolve(null), opTimeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Run one small IDB transaction; a timed-out open degrades just this call, a real
+ * transaction failure degrades the session to memory-only. Returns null either way.
  * @template T
  * @param {string} storeName
  * @param {IDBTransactionMode} mode
@@ -380,7 +523,7 @@ function openDb() {
  * @returns {Promise<{ok: true, value: T|undefined}|null>} null ⇒ use the memory fallback
  */
 async function idbOp(storeName, mode, fn) {
-  const db = await openDb();
+  const db = await dbForOp();
   if (!db) return null;
   try {
     return await new Promise((resolve, reject) => {
@@ -507,7 +650,7 @@ async function pruneIdb() {
   if (countRes === null || typeof countRes.value !== "number") return;
   let excess = countRes.value - cacheMax;
   if (excess <= 0) return;
-  const db = await openDb();
+  const db = await dbForOp();
   if (!db) return;
   try {
     await new Promise((resolve, reject) => {
@@ -537,7 +680,10 @@ async function pruneIdb() {
 export async function laterPut(txn) {
   if (typeof txn !== "object" || txn === null || typeof txn.id !== "number") return;
   const res = await idbOp(LATER_STORE, "readwrite", (s) => s.put(txn));
-  if (res === null) memLater.set(txn.id, txn);
+  if (res === null) {
+    laterFellBack = true;
+    memLater.set(txn.id, txn);
+  }
 }
 
 /**
@@ -550,6 +696,7 @@ export async function laterGet(id) {
     const rec = /** @type {(Record<string, unknown> & {id: number})|undefined} */ (res.value);
     return rec && typeof rec.id === "number" ? rec : null;
   }
+  laterFellBack = true;
   return memLater.get(id) ?? null;
 }
 
@@ -574,5 +721,171 @@ export async function laterGetAll(ids) {
  */
 export async function laterDelete(id) {
   const res = await idbOp(LATER_STORE, "readwrite", (s) => s.delete(id));
-  if (res === null) memLater.delete(id);
+  if (res === null) {
+    laterFellBack = true;
+    memLater.delete(id);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Offline state snapshot — one record, the raw last-good getState result
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} Snapshot
+ * @property {import("./lm.js").LeafCategory[]} categories
+ * @property {import("./lm.js").LMAccount[]} accounts
+ * @property {import("./lm.js").LMTransaction[]} transactions  RAW (undecorated)
+ * @property {number} fetchedAt
+ * @property {boolean} truncated
+ * @property {number|null} total
+ */
+
+/**
+ * Container-level shape guard (lsLoad-style): the arrays are trusted deep, like
+ * every other read path; txn entries are id-filtered on load.
+ * @param {unknown} v
+ * @returns {v is Record<string, unknown> & {categories: unknown[], accounts: unknown[], transactions: unknown[], fetchedAt: number}}
+ */
+function isSnapshotRecord(v) {
+  if (typeof v !== "object" || v === null) return false;
+  const o = /** @type {Record<string, unknown>} */ (v);
+  return (
+    Array.isArray(o.categories) &&
+    Array.isArray(o.accounts) &&
+    Array.isArray(o.transactions) &&
+    typeof o.fetchedAt === "number"
+  );
+}
+
+/**
+ * Same content as the stored record? Txn id-set + category/account counts only —
+ * in-place payee/amount edits on an identical id-set are missed (accepted,
+ * documented in SPEC-STATIC).
+ * @param {unknown} prev
+ * @param {{categories: unknown[], accounts: unknown[], transactions: {id: number}[]}} next
+ * @returns {prev is Record<string, unknown> & {transactions: unknown[]}}
+ */
+function sameSnapshotContent(prev, next) {
+  if (!isSnapshotRecord(prev)) return false;
+  if (prev.categories.length !== next.categories.length) return false;
+  if (prev.accounts.length !== next.accounts.length) return false;
+  if (prev.transactions.length !== next.transactions.length) return false;
+  const ids = new Set(
+    prev.transactions.map((t) => (typeof t === "object" && t !== null ? /** @type {{id?: unknown}} */ (t).id : null)),
+  );
+  return next.transactions.every((t) => ids.has(t.id));
+}
+
+/**
+ * Save the raw state for offline boot. Best-effort: NEVER throws/rejects.
+ * When content is unchanged (see comparator) the full payload write is skipped
+ * but the stored fetchedAt is still bumped — the stale banner must never
+ * overstate the snapshot's age.
+ * @param {{categories: import("./lm.js").LeafCategory[], accounts: import("./lm.js").LMAccount[], transactions: import("./lm.js").LMTransaction[], truncated?: boolean, total?: number|null}} state
+ * @param {number} [now]
+ * @returns {Promise<void>}
+ */
+export async function snapshotSave(state, now = Date.now()) {
+  try {
+    const rec = {
+      key: SNAP_KEY,
+      categories: Array.isArray(state.categories) ? state.categories : [],
+      accounts: Array.isArray(state.accounts) ? state.accounts : [],
+      transactions: Array.isArray(state.transactions) ? state.transactions : [],
+      fetchedAt: now,
+      truncated: state.truncated === true,
+      total: typeof state.total === "number" ? state.total : null,
+    };
+    const db = await dbForOp();
+    if (!db) {
+      memSnap = sameSnapshotContent(memSnap, rec) ? { ...memSnap, fetchedAt: now } : rec;
+      return;
+    }
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(SNAP_STORE, "readwrite");
+      tx.oncomplete = () => resolve(undefined);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+      const store = tx.objectStore(SNAP_STORE);
+      const get = store.get(SNAP_KEY);
+      get.onsuccess = () => {
+        const prev = get.result;
+        store.put(sameSnapshotContent(prev, rec) ? { ...prev, fetchedAt: now } : rec);
+      };
+      get.onerror = () => reject(get.error);
+    });
+  } catch {
+    /* snapshot is best-effort; the live path never depends on it */
+  }
+}
+
+/**
+ * @returns {Promise<Snapshot|null>} null on miss or corruption — the caller falls
+ *   back to the ordinary error/onboarding path.
+ */
+export async function snapshotLoad() {
+  try {
+    const res = await idbOp(SNAP_STORE, "readonly", (s) => s.get(SNAP_KEY));
+    const rec = res !== null ? res.value : memSnap;
+    if (!isSnapshotRecord(rec)) return null;
+    const txns = /** @type {import("./lm.js").LMTransaction[]} */ (
+      rec.transactions.filter((t) => typeof t === "object" && t !== null && typeof (/** @type {{id?: unknown}} */ (t).id) === "number")
+    );
+    return {
+      categories: /** @type {import("./lm.js").LeafCategory[]} */ (rec.categories),
+      accounts: /** @type {import("./lm.js").LMAccount[]} */ (rec.accounts),
+      transactions: txns,
+      fetchedAt: rec.fetchedAt,
+      truncated: rec.truncated === true,
+      total: typeof rec.total === "number" ? rec.total : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Drop flushed txns from the snapshot so an offline boot right after a sync does
+ * not resurrect already-categorized cards. ONE readwrite transaction (get →
+ * filter → put): an aborted tx rolls back wholly — worst case a lost prune,
+ * redone after the next flush. Best-effort: never throws.
+ * @param {number[]} ids
+ * @returns {Promise<void>}
+ */
+export async function snapshotPrune(ids) {
+  if (!Array.isArray(ids) || !ids.length) return;
+  const drop = new Set(ids);
+  /** @param {unknown} t */
+  const keep = (t) =>
+    !(typeof t === "object" && t !== null && drop.has(/** @type {number} */ (/** @type {{id?: unknown}} */ (t).id)));
+  try {
+    const db = await dbForOp();
+    if (!db) {
+      if (memSnap) memSnap = { ...memSnap, transactions: memSnap.transactions.filter(keep) };
+      return;
+    }
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(SNAP_STORE, "readwrite");
+      tx.oncomplete = () => resolve(undefined);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+      const store = tx.objectStore(SNAP_STORE);
+      const get = store.get(SNAP_KEY);
+      get.onsuccess = () => {
+        const rec = get.result;
+        if (!isSnapshotRecord(rec)) return; // nothing to prune
+        store.put({ ...rec, transactions: rec.transactions.filter(keep) });
+      };
+      get.onerror = () => reject(get.error);
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** @returns {Promise<void>} */
+export async function snapshotClear() {
+  memSnap = null;
+  await idbOp(SNAP_STORE, "readwrite", (s) => s.delete(SNAP_KEY));
 }

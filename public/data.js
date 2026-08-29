@@ -9,7 +9,7 @@ import { getState } from "./lib/lm.js";
 import { classifyTransactions, webCheckMerchant } from "./lib/classify.js";
 import { matchRule, ruleSuggestion } from "./lib/rules.js";
 import { cleanMerchant } from "./lib/clean.js";
-import { sugGetMany, sugPut, isSuggestion } from "./lib/store.js";
+import { snapshotLoad, snapshotSave, sugGetMany, sugPut, isSuggestion } from "./lib/store.js";
 
 /**
  * Suggestion as the UI consumes it (superset of the old server shape the deck
@@ -65,6 +65,9 @@ function fromCache(c, source) {
  */
 export async function assembleState(token, rules) {
   const raw = await getState(token);
+  // Offline fallback: persist the RAW state (before decoration) after every
+  // successful fetch. Best-effort — snapshotSave never throws.
+  await snapshotSave(raw);
   /** @type {DeckTxn[]} */
   const txns = raw.transactions.map((t) => ({
     ...t,
@@ -78,6 +81,35 @@ export async function assembleState(token, rules) {
     transactions: txns,
     truncated: raw.truncated,
     total: raw.total,
+  };
+}
+
+/**
+ * Offline boot path: rebuild the deck from the last saved snapshot, decorated in
+ * the SAME order as the live path (rules → cached web → cached ai). The caller
+ * renders it with a stale banner; `fetchedAt` feeds the relative age.
+ * @param {Rule[]} rules
+ * @returns {Promise<{categories: Category[], accounts: Account[], transactions: DeckTxn[], truncated: boolean, total: number|null, stale: true, fetchedAt: number}|null>}
+ *   null when no snapshot exists (first run / cleared / corrupted).
+ */
+export async function assembleFromSnapshot(rules) {
+  const snap = await snapshotLoad();
+  if (!snap) return null;
+  /** @type {DeckTxn[]} */
+  const txns = snap.transactions.map((t) => ({
+    ...t,
+    merchant: cleanMerchant(t.payee || ""),
+    suggestion: null,
+  }));
+  await attachSuggestions(txns, rules);
+  return {
+    categories: snap.categories,
+    accounts: snap.accounts,
+    transactions: txns,
+    truncated: snap.truncated,
+    total: snap.total,
+    stale: true,
+    fetchedAt: snap.fetchedAt,
   };
 }
 

@@ -11,15 +11,17 @@
 // Pure template exports for tests (XSS property test imports cardHTML from app.js).
 export { cardHTML, esc, splitEmoji, fmtAmount, fmtAmountText, isConfident, CONFIDENT_AT } from "./lib/card.js";
 
-import { LMError, applyCategories, getMe, KEEPALIVE_MAX_ITEMS } from "./lib/lm.js";
+import { LMError, applyCategories, getMe, getState, getTransaction, KEEPALIVE_MAX_ITEMS } from "./lib/lm.js";
 import { ORError, checkKey } from "./lib/classify.js";
 import {
   getTokens, setTokens, clearTokens,
-  queueLoad, queueSave, keepaliveEligible,
+  queueLoad, queueSave, queueMutate, keepaliveEligible, LS_KEYS,
+  snapshotPrune,
   laterLoad, laterAdd, laterRemove,
   rulesLoad, ruleAdd, rulesSave,
 } from "./lib/store.js";
-import { assembleState, classifyPass1, webCheck, merchantKeyOf } from "./data.js";
+import { replayQueue, isPoisonStatus, STUCK_AFTER_ATTEMPTS } from "./lib/sync.js";
+import { assembleState, assembleFromSnapshot, classifyPass1, webCheck, merchantKeyOf } from "./data.js";
 import {
   esc, splitEmoji, fmtAmountText, isConfident as cardConfident, cardHTML, CONFIDENT_AT,
 } from "./lib/card.js";
@@ -107,7 +109,41 @@ function main() {
   const lsSave = (key, value) => {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch { storageFailed(); }
   };
-  const persistQueue = () => { try { queueSave(queue); } catch { storageFailed(); } };
+
+  /** Queue item identity is (id, ts) — object references go stale across fresh-read
+   *  merges, so every cross-write lookup (inflight, undo finalize, make_rule attach)
+   *  goes through this string key instead.
+   *  @param {QueueItem} it */
+  const keyOf = (it) => `${it.id}:${it.ts}`;
+  /** Collapse duplicate ids — max ts wins (mirrors store.queueMutate's merge: two
+   *  tabs queuing the same txn must never leave duplicate ids for one PUT body).
+   *  @param {QueueItem[]} items @returns {QueueItem[]} */
+  const collapseQueue = (items) => {
+    /** @type {Map<number, QueueItem>} */
+    const byId = new Map();
+    for (const it of items) {
+      const prev = byId.get(it.id);
+      if (!prev || it.ts >= prev.ts) byId.set(it.id, it);
+    }
+    return [...byId.values()];
+  };
+  /** Decision-path queue write: SYNCHRONOUS fresh-read-merge (queueLoad → fn →
+   *  queueSave), NO lock — async lock callbacks may never run during teardown
+   *  (pagehide), and single-item appends/marks are conflict-free. The fresh read
+   *  is the load-bearing part: it merges concurrent table-tab/other-tab writes
+   *  instead of clobbering them with our stale in-memory view. `fn` mutates the
+   *  FRESH array; item mutations must look up by (id, ts). Slow multi-step paths
+   *  (interactive flush persistence, replay) use store.queueMutate instead.
+   *  Refreshes the in-memory `queue` view.
+   *  @param {(q: QueueItem[]) => void} fn */
+  function queueWriteSync(fn) {
+    try {
+      const fresh = queueLoad();
+      fn(fresh);
+      queue = collapseQueue(fresh);
+      queueSave(queue);
+    } catch { storageFailed(); }
+  }
 
   // ---------- state ----------
   /** @type {Category[]} */
@@ -127,7 +163,13 @@ function main() {
   let setDone = 0;
   let decisions = 0;
   let streak = 0;
-  let stateLoaded = false;
+  /** Tri-state replacing the old stateLoaded boolean: "live" = fresh fetch this
+   *  session, "snapshot" = offline boot from the stored snapshot (deck works,
+   *  network-adjacent features gated), "none" = nothing renderable yet. */
+  /** @type {"none"|"live"|"snapshot"} */
+  let loadState = "none";
+  /** @type {number|null} */
+  let snapshotFetchedAt = null; // fetchedAt of the snapshot we booted from (stale banner)
   /** @type {Error|null} */
   let stateError = null;
   let classifyRunning = false;
@@ -149,8 +191,18 @@ function main() {
   let backoffIdx = 0;
   /** @type {ReturnType<typeof setTimeout>|null} */
   let flushTimer = null;
-  /** @type {Set<QueueItem>} */
-  const inflight = new Set(); // queue item refs currently being flushed
+  /** @type {Set<string>} */
+  const inflight = new Set(); // "(id):(ts)" keys currently being flushed (keys, not refs — see keyOf)
+  // connectivity reducer state (fetch outcomes are truth; events are probes)
+  let lmFailStreak = 0; // consecutive LM-origin network-class failures
+  let wasOffline = false; // last settled verdict, for transition detection
+  /** @type {ReturnType<typeof setTimeout>|null} */
+  let onlineResyncTimer = null; // debounces the one back-online flush+refresh
+  let pendingSheetResync = false; // online resync arrived while a sheet was open
+  /** @type {Map<string, number>} */
+  const poisonAttempts = new Map(); // SESSION-ONLY rejected-PUT counter per (id,ts) key
+  /** @type {Map<string, number>} */
+  const webTransientFails = new Map(); // per-merchant transient web-check failures this session
   let lastPct = -1;
   let inboxCelebrated = false;
   let dealAnim = false; // next renderStack deals cards in with the drop+dust effect
@@ -234,6 +286,7 @@ function main() {
     badgeToggle: $input("#badgeToggle"), settingsError: $el("#settingsError"), menuSettings: $btn("#menuSettings"),
     onboardCard: $el("#onboardCard"), onboardOpen: $btn("#onboardOpen"),
     webBar: $el("#webBar"), webBarBtn: $btn("#webBarBtn"),
+    connChip: $el("#connChip"), staleBanner: $el("#staleBanner"), stuckBanner: $btn("#stuckBanner"),
     updateToast: $el("#updateToast"), updateBtn: $btn("#updateBtn"),
     confetti: $canvas("#confetti"),
   };
@@ -335,8 +388,10 @@ function main() {
     allTxns = data.transactions;
     lastFetchTs = Date.now();
     snapshotIds = new Set(allTxns.map((t) => t.id));
-    stateLoaded = true;
+    loadState = "live";
+    snapshotFetchedAt = null; // leaves snapshot mode; stale banner clears via updateConnUI
     stateError = null;
+    noteConnOutcome("lm", null);
     if (data.truncated && !truncationNoted) {
       truncationNoted = true;
       note(`Sorting the oldest ${allTxns.length}${data.total ? ` of ${data.total}` : ""} uncategorized`);
@@ -345,7 +400,10 @@ function main() {
 
   // ---------- data layer: pass 1 (rules already attached during assembly) ----------
   async function ensureClassified() {
-    if (classifyRunning || !stateLoaded) return;
+    // AUTOMATIC classification is live-mode + online only (snapshot decks already
+    // carry cached suggestions; hammering a dead network helps nobody). Explicit
+    // user actions reach the network via refresh()/maybeWebCheck(true) instead.
+    if (classifyRunning || loadState !== "live" || connOffline()) return;
     const unsuggested = [...set, ...backlog].filter((t) => !t.suggestion);
     if (!unsuggested.length) { maybeWebCheck(); return; }
     if (!tokens.or) { updateWebBar(); return; } // LM-only mode: bar offers the Settings path
@@ -353,12 +411,14 @@ function main() {
     renderStack();
     try {
       await classifyPass1(tokens.or, categories, unsuggested, absorbPass1Slice);
+      noteConnOutcome("or", null);
     } catch (e) {
-      if (!routeORError(e)) note("Classifier hiccup — will retry later");
+      noteConnOutcome("or", e);
+      if (!routeORError(e) && !connOffline()) note("Classifier hiccup — will retry later");
     } finally {
       classifyRunning = false;
       // reached the end while the user emptied the deck -> celebrate now
-      if (stateLoaded && !set.length && !backlog.length && decisions > 0) celebrateInboxZero();
+      if (loadState === "live" && !set.length && !backlog.length && decisions > 0) celebrateInboxZero();
       renderStack(); updateMeters();
       maybeWebCheck();
     }
@@ -397,8 +457,10 @@ function main() {
 
   const webBudget = () => Math.max(0, WEB_AUTO_CAP + webExtraAllowance - webChecksUsed - webInflight.size);
 
-  function maybeWebCheck() {
-    if (!tokens.or || !stateLoaded) { updateWebBar(); return; }
+  /** @param {boolean} [force]  true = explicit user action ("Web-check N more"):
+   *  always try the network, even when the reducer says offline */
+  function maybeWebCheck(force = false) {
+    if (!tokens.or || loadState !== "live" || (!force && connOffline())) { updateWebBar(); return; }
     const pending = pendingWebKeys();
     let budget = webBudget();
     for (const [key, merchant] of pending) {
@@ -416,6 +478,7 @@ function main() {
     updateWebCheckLine();
     try {
       const sug = await webCheck(tokens.or, merchant, categories);
+      noteConnOutcome("or", null);
       webDone.add(key);
       webChecksUsed++; // counted on completion; webInflight covers the in-flight window
       for (const t of allTxns) {
@@ -425,8 +488,20 @@ function main() {
       }
       reconcile();
     } catch (e) {
-      webDone.add(key); // cost safety: no automatic retry-hammering this session
-      if (!routeORError(e)) note(`Web check failed for ${merchant || "merchant"}`);
+      noteConnOutcome("or", e);
+      // Budget honesty vs cost safety: only a DEFINITIVE rejection (4xx excl 429)
+      // burns the merchant for the session immediately. Transient failures
+      // (rejection, parse garbage, 5xx, 429) get up to 2 session retries — a bad
+      // cell moment must not eat the auto budget — then we stop hammering.
+      const definitive = e instanceof ORError && e.status >= 400 && e.status < 500 && e.status !== 429;
+      if (definitive) {
+        webDone.add(key);
+      } else {
+        const fails = (webTransientFails.get(key) ?? 0) + 1;
+        webTransientFails.set(key, fails);
+        if (fails >= 3) webDone.add(key); // first try + 2 retries: done for the session
+      }
+      if (!routeORError(e) && !connOffline()) note(`Web check failed for ${merchant || "merchant"}`);
     } finally {
       webInflight.delete(key);
       maybeWebCheck(); // freed capacity dispatches remaining pending keys
@@ -437,7 +512,7 @@ function main() {
   /** Floating bar above the actions: LM-only hint, or the explicit over-cap web-check button. */
   function updateWebBar() {
     const bar = els.webBar;
-    if (!stateLoaded) { bar.hidden = true; return; }
+    if (loadState !== "live") { bar.hidden = true; return; } // snapshot mode: no web spend UI
     if (!tokens.or) {
       const wantsAI = !!tokens.lm && [...set, ...backlog].some((t) => !t.suggestion || webCandidateKey(t));
       if (wantsAI) {
@@ -458,7 +533,9 @@ function main() {
   }
 
   async function refresh() {
-    if (refreshing || !stateLoaded || sheetOpenNow()) return;
+    // Allowed in "snapshot" mode — refresh IS the recovery path out of an offline
+    // boot (else a snapshot session strands forever); only "none" has nothing to refresh.
+    if (refreshing || loadState === "none" || sheetOpenNow()) return;
     refreshing = true;
     try {
       await flush("refresh");
@@ -466,11 +543,59 @@ function main() {
       reconcile(); // behind the top card only
       ensureClassified();
     } catch (e) {
+      if (!isNoTokenErr(e)) noteConnOutcome("lm", e);
       routeLMError(e);
-      // unrouted network errors: silent, next refresh will retry
+      // unrouted network errors: silent, next refresh will retry (recovery probe)
     } finally {
       refreshing = false;
     }
+  }
+
+  // ---------- connectivity reducer (fetch outcomes are truth; events are probes) ----------
+  /** Local pre-fetch error (missing token): never a network outcome. @param {unknown} e */
+  const isNoTokenErr = (e) => e instanceof Error && /** @type {Error & {noToken?: boolean}} */ (e).noToken === true;
+
+  /** The settled verdict the UI and gates read. Two consecutive LM-origin failures
+   *  OR the browser flatly saying so — a single blip must not paint the app offline. */
+  const connOffline = () => navigator.onLine === false || lmFailStreak >= 2;
+
+  /** Feed ONE fetch outcome into the reducer (only LM/OR API calls — never SW asset
+   *  loads). A typed error carrying a real HTTP status means the server was REACHABLE
+   *  (captive-portal 511 included) ⇒ counts as online evidence; only fetch rejection
+   *  (TypeError) and parse garbage (SyntaxError / malformed-shape Errors — captive
+   *  portals that 200 garbage) are offline candidates, and only LM-origin ones count
+   *  toward the threshold: an OR-only outage must not paint the app offline.
+   *  @param {"lm"|"or"} origin @param {unknown} err  null = success */
+  function noteConnOutcome(origin, err) {
+    if (err == null || err instanceof LMError || err instanceof ORError) lmFailStreak = 0;
+    else if (origin === "lm") lmFailStreak++;
+    connSettle();
+  }
+
+  /** Re-evaluate the verdict; on the offline→online transition cancel the paused
+   *  backoff and run ONE debounced flush+refresh. Also the landing point for the
+   *  event probes (online/offline/pageshow) — they only ever hint, never decide. */
+  function connSettle() {
+    const off = connOffline();
+    if (wasOffline && !off) {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      backoffIdx = 0;
+      scheduleOnlineResync();
+    }
+    wasOffline = off;
+    updateConnUI();
+  }
+
+  /** Debounced: a success outcome and an `online` event landing together must yield
+   *  ONE resync (iOS fires `online` before DNS actually works — failures stay quiet). */
+  function scheduleOnlineResync() {
+    if (onlineResyncTimer) return;
+    onlineResyncTimer = setTimeout(() => { onlineResyncTimer = null; runOnlineResync(); }, 400);
+  }
+  async function runOnlineResync() {
+    try { await flush("online"); } catch { /* flush routes/backs off internally */ }
+    if (sheetOpenNow()) { pendingSheetResync = true; return; } // re-armed on sheet close
+    refresh(); // quiet failure degrades back into the reducer/backoff
   }
 
   // ---------- apply queue ----------
@@ -510,67 +635,194 @@ function main() {
     }
   }
 
+  /** ONE membership recheck for the whole interactive flush (uncategorized window
+   *  via getState + per-id getTransaction fallback; absence alone NEVER discards a
+   *  decision — same rules lib/lm.js applies). Kept SEPARATE from the PUT stage so
+   *  poison bisect can re-PUT already-validated items with recheck:"none" instead
+   *  of re-paging the window per half. Cost: getState also fetches categories/
+   *  accounts we discard — same accepted trade as lib/sync.js's replay recheck.
+   *  @param {string} lmToken @param {QueueItem[]} batch
+   *  @returns {Promise<{sendable: QueueItem[], skipped: number[]}>} */
+  async function membershipRecheck(lmToken, batch) {
+    const win = await getState(lmToken);
+    const open = new Set(win.transactions.map((t) => t.id));
+    /** @type {QueueItem[]} */
+    const sendable = [];
+    /** @type {number[]} */
+    const skipped = [];
+    /** @type {QueueItem[]} */
+    const misses = [];
+    for (const it of batch) (open.has(it.id) ? sendable : misses).push(it);
+    for (let i = 0; i < misses.length; i += 10) {
+      const slice = misses.slice(i, i + 10);
+      const current = await Promise.all(slice.map((it) =>
+        getTransaction(lmToken, it.id).catch((e) => {
+          if (e instanceof LMError && e.status === 404) return null; // deleted / re-pointed budget
+          throw e;
+        })));
+      slice.forEach((it, j) => {
+        const t = current[j];
+        if (t && t.category_id === null) sendable.push(it); // merely outside the paged window
+        else skipped.push(it.id); // categorized elsewhere, or gone
+      });
+    }
+    return { sendable, skipped };
+  }
+
+  /** PUT one already-validated chunk (recheck:"none" — stage 1 vouched for every
+   *  item), isolating poison request bodies by bisection: a 4xx excluding
+   *  401/408/429 (lib/sync.js isPoisonStatus) splits the chunk until the failing
+   *  item(s) stand alone. An isolated failure counts one SESSION-ONLY attempt; at
+   *  STUCK_AFTER_ATTEMPTS the item is parked (flushable:false + stuck reason) and
+   *  surfaced by updateStuckUI. 401 and transients (408/429/5xx/rejection) rethrow
+   *  into the caller's ordinary routing/backoff — no attempt counted.
+   *  @param {string} lmToken @param {QueueItem[]} chunk
+   *  @returns {Promise<{applied: number[], parked: number[]}>} */
+  async function putChunkIsolating(lmToken, chunk) {
+    try {
+      await applyCategories(lmToken, chunk.map(itemPayload), { recheck: "none" });
+      return { applied: chunk.map((it) => it.id), parked: [] };
+    } catch (e) {
+      if (!(e instanceof LMError) || !isPoisonStatus(e.status)) throw e;
+      const lone = chunk.length === 1 ? chunk[0] : undefined;
+      if (lone) {
+        const k = keyOf(lone);
+        const attempts = (poisonAttempts.get(k) ?? 0) + 1;
+        poisonAttempts.set(k, attempts);
+        if (attempts < STUCK_AFTER_ATTEMPTS) return { applied: [], parked: [] }; // retried next flush
+        const reason = `HTTP ${e.status}`;
+        try {
+          queue = await queueMutate((q) => {
+            const f = q.find((x) => x.id === lone.id && x.ts === lone.ts);
+            if (f) { f.flushable = false; f.stuck = reason; }
+          });
+        } catch { storageFailed(); }
+        return { applied: [], parked: [lone.id] };
+      }
+      const mid = Math.ceil(chunk.length / 2);
+      const a = await putChunkIsolating(lmToken, chunk.slice(0, mid));
+      const b = await putChunkIsolating(lmToken, chunk.slice(mid));
+      return { applied: [...a.applied, ...b.applied], parked: [...a.parked, ...b.parked] };
+    }
+  }
+
   /** @param {string} reason */
   async function flush(reason) {
     if (!tokens.lm) return;
     if (reason === "hidden") { flushHidden(tokens.lm); return; }
     const lmToken = tokens.lm;
-    const batch = queue.filter((it) => it.flushable && !inflight.has(it));
-    if (!batch.length) return;
-    const prevSent = new Set(batch.filter((it) => it.sent).map((it) => it.id));
-    for (const it of batch) { inflight.add(it); it.sent = true; }
-    persistQueue(); // persist `sent` before the request may reach Lunch Money
-    /** @type {number[]} */
-    const skippedLive = [];
+    const selected = queue.filter((it) => it.flushable && !it.stuck && !inflight.has(keyOf(it)));
+    if (!selected.length) return;
+    const prevSent = new Set(selected.filter((it) => it.sent).map((it) => it.id));
+    const wantKeys = new Set(selected.map(keyOf));
+    // inflight BEFORE the persistence attempt: a storage failure re-enters flush via
+    // storageFailed(), and these keys are what makes that re-entry a no-op.
+    for (const k of wantKeys) inflight.add(k);
+    let batch = selected;
     try {
-      for (let i = 0; i < batch.length; i += APPLY_CHUNK) {
-        const chunk = batch.slice(i, i + APPLY_CHUNK);
-        // membership recheck (window + per-id fallback) happens inside lib/lm.js
-        const res = await applyCategories(lmToken, chunk.map(itemPayload), { recheck: "membership" });
-        const done = new Set([...res.applied, ...res.skipped]);
-        absorbMakeRules(chunk, res.applied);
-        queue = queue.filter((it) => !done.has(it.id));
-        for (const it of chunk) inflight.delete(it);
-        persistQueue();
-        if (reason !== "replay") skippedLive.push(...res.skipped);
-        // replay skips are the user's own past work: swallow silently
+      // persist `sent` (queueMutate: slow-path lock + fresh-read merge) BEFORE the
+      // request may reach Lunch Money; storage failure degrades durability only —
+      // the flush itself proceeds (that IS the storage-degraded compensation).
+      queue = await queueMutate((q) => { for (const it of q) if (wantKeys.has(keyOf(it))) it.sent = true; });
+      batch = queue.filter((it) => wantKeys.has(keyOf(it)));
+      for (const k of wantKeys) { // collapse may have dropped a duplicate-id loser
+        if (!batch.some((it) => keyOf(it) === k)) inflight.delete(k);
       }
-      backoffIdx = 0;
-      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-      if (skippedLive.length) absorbSkipped(skippedLive, prevSent);
+    } catch { storageFailed(); }
+
+    // stage 1: ONE membership recheck for the whole flush (network, lock-free)
+    /** @type {{sendable: QueueItem[], skipped: number[]}} */
+    let checked;
+    try {
+      checked = await membershipRecheck(lmToken, batch);
     } catch (e) {
-      for (const it of batch) inflight.delete(it); // clear in-flight on failure
+      for (const k of wantKeys) inflight.delete(k);
+      noteConnOutcome("lm", e);
       // Routed errors (dead/missing token) keep the queue in localStorage but skip
       // the hot retry loop — retrying can't succeed until the user fixes the cause.
+      if (routeLMError(e)) return;
+      scheduleRetry();
+      return;
+    }
+    if (checked.skipped.length) {
+      // already categorized elsewhere / deleted: drop + prune, nothing to PUT
+      const done = new Set(checked.skipped);
+      try { queue = await queueMutate((q) => q.filter((it) => !done.has(it.id))); }
+      catch { storageFailed(); }
+      for (const it of batch) if (done.has(it.id)) inflight.delete(keyOf(it));
+      snapshotPrune(checked.skipped).catch(() => { /* best-effort; redone next flush */ });
+    }
+
+    // stage 2: PUT in APPLY_CHUNK chunks (recheck:"none" — stage 1 validated),
+    // poison-isolated; persistence per chunk via queueMutate, lock never across the PUT
+    let appliedCount = 0;
+    try {
+      for (let i = 0; i < checked.sendable.length; i += APPLY_CHUNK) {
+        const chunk = checked.sendable.slice(i, i + APPLY_CHUNK);
+        const res = await putChunkIsolating(lmToken, chunk);
+        const applied = new Set(res.applied);
+        absorbMakeRules(chunk, res.applied);
+        try { queue = await queueMutate((q) => q.filter((it) => !applied.has(it.id))); }
+        catch { storageFailed(); }
+        for (const it of chunk) inflight.delete(keyOf(it));
+        if (res.applied.length) snapshotPrune(res.applied).catch(() => { /* best-effort */ });
+        appliedCount += res.applied.length;
+      }
+      noteConnOutcome("lm", null);
+      backoffIdx = 0;
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+      if (reason === "online" && appliedCount) note(`Synced ${appliedCount} ✓`);
+      if (checked.skipped.length) absorbSkipped(checked.skipped, prevSent);
+      updateConnUI();
+    } catch (e) {
+      for (const it of checked.sendable) inflight.delete(keyOf(it)); // clear in-flight on failure
+      noteConnOutcome("lm", e);
       if (routeLMError(e)) return;
       scheduleRetry();
     }
   }
 
   /** Pagehide/hidden flush: NO network recheck, so eligibility is restricted to
-   *  items decided against THIS session's snapshot (store.keepaliveEligible) and
-   *  validated against it in memory. ONE keepalive PUT, ≤20 items. Older items
-   *  stay queued for the recheck-based replay on next open — an unvalidated stale
-   *  PUT could clobber category work done elsewhere since.
+   *  items decided against THIS session's snapshot AND only while that snapshot is
+   *  fresh (<10 min — store.keepaliveEligible's freshness bound: a sheet left open
+   *  all afternoon ages out and defers to the recheck-based replay), validated
+   *  against it in memory. ONE keepalive PUT, ≤20 items. Older items stay queued
+   *  for the replay on next open — an unvalidated stale PUT could clobber category
+   *  work done elsewhere since. Snapshot-mode decisions carry snapshotTs:null, so
+   *  this path is structurally unreachable for them.
+   *  Sent-marking stays a SYNCHRONOUS unlocked fresh-read-merge (documented
+   *  exception to the queueMutate rule): async lock callbacks may never run during
+   *  pagehide teardown.
    *  @param {string} lmToken */
   function flushHidden(lmToken) {
-    const batch = keepaliveEligible(queue, lastFetchTs)
-      .filter((it) => !inflight.has(it) && snapshotIds.has(it.id))
-      .slice(0, KEEPALIVE_MAX_ITEMS);
+    const eligibleKeys = new Set(
+      keepaliveEligible(queue, lastFetchTs)
+        .filter((it) => !inflight.has(keyOf(it)) && snapshotIds.has(it.id))
+        .slice(0, KEEPALIVE_MAX_ITEMS)
+        .map(keyOf),
+    );
+    if (!eligibleKeys.size) return;
+    queueWriteSync((q) => { for (const it of q) if (eligibleKeys.has(keyOf(it))) it.sent = true; });
+    const batch = queue.filter((it) => eligibleKeys.has(keyOf(it)));
     if (!batch.length) return;
-    for (const it of batch) { inflight.add(it); it.sent = true; }
-    persistQueue();
+    for (const it of batch) inflight.add(keyOf(it));
     applyCategories(lmToken, batch.map(itemPayload), { recheck: "none", keepalive: true })
       .then((res) => {
         const done = new Set([...res.applied, ...res.skipped]);
         absorbMakeRules(batch, res.applied);
-        queue = queue.filter((it) => !done.has(it.id));
-        for (const it of batch) inflight.delete(it);
-        persistQueue();
+        queueWriteSync((q2) => {
+          for (let i = q2.length - 1; i >= 0; i--) {
+            const it = q2[i];
+            if (it && done.has(it.id)) q2.splice(i, 1);
+          }
+        });
+        for (const it of batch) inflight.delete(keyOf(it));
+        snapshotPrune([...done]).catch(() => { /* teardown best-effort; redone next flush */ });
+        updateConnUI();
       })
       .catch(() => {
         // page may already be gone; replay on next open covers it
-        for (const it of batch) inflight.delete(it);
+        for (const it of batch) inflight.delete(keyOf(it));
       });
   }
 
@@ -592,6 +844,13 @@ function main() {
   }
 
   function scheduleRetry() {
+    if (connOffline()) {
+      // Offline: pause the backoff timer entirely (the online transition restarts
+      // syncing) and suppress the toast — a nag per failed retry says nothing the
+      // chip doesn't. The 5-min refresh interval and onVisible KEEP RUNNING as the
+      // recovery probes; recovery never hinges on the unreliable `online` event.
+      return;
+    }
     const delay = BACKOFF[Math.min(backoffIdx, BACKOFF.length - 1)] ?? 60000;
     backoffIdx++;
     if (flushTimer) clearTimeout(flushTimer);
@@ -600,17 +859,19 @@ function main() {
   }
 
   function maybeThresholdFlush() {
-    if (queue.filter((it) => it.flushable && !inflight.has(it)).length >= FLUSH_AT) flush("threshold");
+    if (queue.filter((it) => it.flushable && !it.stuck && !inflight.has(keyOf(it))).length >= FLUSH_AT) flush("threshold");
   }
 
   // ---------- decisions ----------
   /** @param {Txn} txn @param {number} categoryId @param {boolean} viaPicker */
   function decideApply(txn, categoryId, viaPicker) {
     finalizeUndo(); // previous item becomes flushable first
+    // snapshotTs: null in snapshot mode (lastFetchTs stays null there) — routes the
+    // decision through the recheck-based replay only, never the keepalive flush.
     /** @type {QueueItem} */
     const item = { id: txn.id, category_id: categoryId, ts: Date.now(), snapshotTs: lastFetchTs, flushable: false, sent: false };
-    queue.push(item);
-    persistQueue(); // SYNCHRONOUS, before any animation
+    queueWriteSync((q) => { q.push(item); }); // SYNCHRONOUS, before any animation
+    updateConnUI(); // offline chip queue count
     afterDecision({ kind: "apply", txn, item, viaPicker });
   }
 
@@ -647,7 +908,7 @@ function main() {
         celebrateSet();
         dealSet();
         dealAnim = true;
-      } else if (stateLoaded && !classifyRunning) {
+      } else if (loadState !== "none" && !classifyRunning) { // snapshot decks celebrate too (hedged copy)
         celebrateInboxZero();
       }
     }
@@ -703,8 +964,12 @@ function main() {
     undoState = null;
     hideUndoToast();
     if (u.kind === "apply" && u.item) {
-      u.item.flushable = true;
-      persistQueue();
+      // by (id,ts) on the fresh array — u.item may be a detached copy by now
+      const { id, ts } = u.item;
+      queueWriteSync((q) => {
+        const f = q.find((it) => it.id === id && it.ts === ts);
+        if (f) f.flushable = true;
+      });
       maybeThresholdFlush();
     }
   }
@@ -736,8 +1001,14 @@ function main() {
     undoState = null;
     hideUndoToast();
     if (u.kind === "apply") {
-      queue = queue.filter((it) => it !== u.item);
-      persistQueue();
+      const item = u.item;
+      if (item) {
+        queueWriteSync((q) => {
+          const i = q.findIndex((it) => it.id === item.id && it.ts === item.ts);
+          if (i >= 0) q.splice(i, 1);
+        });
+      }
+      updateConnUI(); // offline chip queue count
     } else {
       later = later.filter((t) => t.id !== u.txn.id);
       try { laterRemove(u.txn.id); } catch { /* pointer cleanup is best-effort */ }
@@ -798,7 +1069,7 @@ function main() {
 
     if (!want.length) {
       for (const el of kept.values()) el.remove();
-      if (!stateLoaded && !stateError) {
+      if (loadState === "none" && !stateError) {
         stack.appendChild(specialCard("skeleton", `
           <div class="skel-emoji">🃏</div>
           <div class="skel-text">shuffling the deck…</div>
@@ -816,7 +1087,10 @@ function main() {
           <div class="skel-text">warming up cards…</div>
           <div class="skel-bar"></div>`));
       } else {
-        const subHtml = later.length ? esc(`${later.length} parked for later`) : "Nothing left to sort 🎉";
+        // snapshot mode can't know the server is empty — hedge instead of "sorted"
+        const subHtml = later.length ? esc(`${later.length} parked for later`)
+          : loadState === "snapshot" && queue.length ? esc(`All local cards sorted — ${queue.length} waiting to sync`)
+          : "Nothing left to sort 🎉";
         stack.appendChild(specialCard("empty-card", `
           <div class="empty-emoji">🏆</div>
           <div class="empty-title">Inbox zero</div>
@@ -894,7 +1168,7 @@ function main() {
   function updateMeters() {
     const total = setDone + set.length;
     const remaining = set.length + backlog.length;
-    const pct = total ? Math.round((setDone / total) * 100) : (stateLoaded ? 100 : 0);
+    const pct = total ? Math.round((setDone / total) * 100) : (loadState !== "none" ? 100 : 0);
     if (pct !== lastPct) {
       lastPct = pct;
       els.progressFill.style.width = pct + "%";
@@ -909,7 +1183,7 @@ function main() {
         bar.setAttribute("aria-valuetext", `${setDone} of ${total} this set`);
       }
     }
-    els.meter.textContent = !stateLoaded
+    els.meter.textContent = loadState === "none"
       ? "loading…"
       : remaining
         ? `${setDone}/${total} this set · ${remaining} to go`
@@ -1211,6 +1485,7 @@ function main() {
         sheetReturnFocus?.focus?.();
         sheetReturnFocus = null;
         maybeShowUpdateToast(); // a suppressed "New version" toast may surface now
+        if (pendingSheetResync) { pendingSheetResync = false; scheduleOnlineResync(); } // sheet-blocked online refresh re-arms
       }
     }, reducedMotion ? 130 : 340);
   }
@@ -1372,11 +1647,18 @@ function main() {
     els.webCheckLine.hidden = false;
   }
 
+  let saveAnywayArmed = false; // second tap saves unverified after a network-class validation failure
+  function disarmSaveAnyway() {
+    saveAnywayArmed = false;
+    els.settingsSave.textContent = "Save";
+  }
+
   /** @param {"lm"|"or"|null} deadField  names the token the upstream just rejected */
   function openSettingsSheet(deadField) {
     els.menuPop.hidden = true;
     els.lmTokenInput.value = "";
     els.orTokenInput.value = "";
+    disarmSaveAnyway();
     clearSettingsErrors();
     els.lmTokenHint.textContent = "Configured ✓ — paste to replace";
     els.lmTokenHint.hidden = !tokens.lm || deadField === "lm";
@@ -1400,8 +1682,10 @@ function main() {
   }
   function closeSettingsSheet() { closeSheet(els.settingsSheet); }
 
-  /** Live per-field validation; paints hint/error itself.
-   * @param {"lm"|"or"} which @param {string} val @returns {Promise<"ok"|"bad">} */
+  /** Live per-field validation; paints hint/error itself. "netfail" = the token
+   *  wasn't REJECTED, we just couldn't reach the validator (offline / upstream
+   *  down) — saveSettings offers "Save anyway" for that class only.
+   * @param {"lm"|"or"} which @param {string} val @returns {Promise<"ok"|"bad"|"netfail">} */
   async function validateTokenField(which, val) {
     const input = which === "lm" ? els.lmTokenInput : els.orTokenInput;
     try {
@@ -1426,7 +1710,7 @@ function main() {
       setFieldError(which, rejected
         ? (which === "lm" ? "Lunch Money rejected this token." : "OpenRouter rejected this key.")
         : "Couldn't verify — check your connection and try again.");
-      return "bad";
+      return rejected ? "bad" : "netfail";
     }
   }
 
@@ -1438,14 +1722,25 @@ function main() {
     els.settingsSave.disabled = true;
     els.settingsSave.textContent = "Checking…";
     try {
-      const [lmRes, orRes] = await Promise.all([
-        lm ? validateTokenField("lm", lm) : Promise.resolve("ok"),
-        or ? validateTokenField("or", or) : Promise.resolve("ok"),
-      ]);
-      if (lmRes === "bad" || orRes === "bad") return; // field errors already painted
+      // An armed "Save anyway" skips re-validation — the previous attempt already
+      // told us the validators are unreachable; trying again is just a slower no.
+      if (!saveAnywayArmed) {
+        const [lmRes, orRes] = await Promise.all([
+          lm ? validateTokenField("lm", lm) : Promise.resolve(/** @type {const} */ ("ok")),
+          or ? validateTokenField("or", or) : Promise.resolve(/** @type {const} */ ("ok")),
+        ]);
+        if (lmRes === "bad" || orRes === "bad") return; // field errors already painted
+        if (lmRes === "netfail" || orRes === "netfail") {
+          // network-class failure only (token NOT rejected): offer an unverified save
+          saveAnywayArmed = true;
+          setSettingsError("Couldn't verify — you can save anyway and dopo will try the token when it can connect.");
+          return;
+        }
+      }
       // MERGE semantics in store.setTokens: saving one token never drops the other
       try { setTokens({ ...(lm ? { lm } : {}), ...(or ? { or } : {}) }); } catch { storageFailed(); }
       tokens = getTokens();
+      saveAnywayArmed = false;
       if (lm) deadTokenNoted.delete("lm");
       if (or) deadTokenNoted.delete("or");
       els.lmTokenInput.value = "";
@@ -1455,13 +1750,13 @@ function main() {
       if (onboardingActive) hideOnboarding();
       // let the close animation land, then (re)load with the new tokens
       setTimeout(() => {
-        if (stateLoaded) { refresh(); updateWebBar(); } else retryLoad();
+        if (loadState !== "none") { refresh(); updateWebBar(); } else retryLoad(); // snapshot takes the refresh() arm
       }, reducedMotion ? 200 : 420);
     } catch (e) {
       setSettingsError((e instanceof Error && e.message) || "Couldn't save — try again.");
     } finally {
       els.settingsSave.disabled = false;
-      els.settingsSave.textContent = "Save";
+      els.settingsSave.textContent = saveAnywayArmed ? "Save anyway (couldn't verify)" : "Save";
     }
   }
 
@@ -1469,6 +1764,7 @@ function main() {
   function onForgetTokens() {
     clearTokens();
     tokens = getTokens();
+    disarmSaveAnyway();
     els.lmTokenHint.hidden = true;
     els.orTokenHint.hidden = true;
     els.budgetLine.hidden = true;
@@ -1514,7 +1810,7 @@ function main() {
     if (max) { try { localStorage.setItem(LS.sug, max); } catch { /* toast is a bonus */ } }
   }
   function maybeSuggestionToast() {
-    if (sugToastShown || !stateLoaded) return;
+    if (sugToastShown || loadState !== "live") return; // snapshot suggestions aren't news
     sugToastShown = true;
     const stamp = readSugStamp();
     if (stamp) {
@@ -1623,9 +1919,11 @@ function main() {
     inboxCelebrated = true;
     confetti(190);
     haptic([20, 60, 20, 60, 40]);
-    showCelebrate("🏆", "Inbox zero",
-      later.length ? `${later.length} parked for later` : "Every transaction sorted. Legend.",
-      { button: true });
+    // snapshot mode can't claim the server inbox is clear — hedge, don't "Legend."
+    const sub = later.length ? `${later.length} parked for later`
+      : loadState === "snapshot" && queue.length ? `All local cards sorted — ${queue.length} waiting to sync`
+      : "Every transaction sorted. Legend.";
+    showCelebrate("🏆", "Inbox zero", sub, { button: true });
   }
 
   // canvas confetti, no lib
@@ -1687,6 +1985,76 @@ function main() {
     else { confettiRAF = 0; els.confetti.classList.remove("on"); }
   }
 
+  // ---------- offline / sync status UI (S6) ----------
+  /** @param {number} ts */
+  function relAge(ts) {
+    const mins = Math.max(0, Math.round((Date.now() - ts) / 60000));
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins} min ago`;
+    const hours = Math.round(mins / 60);
+    if (hours < 48) return `${hours} h ago`;
+    const days = Math.round(hours / 24);
+    return `${days} days ago`;
+  }
+
+  /** One entry point for the passive status surfaces: offline chip, stale banner,
+   *  stuck banner. Cheap — safe to call from every decision/flush/event path. */
+  function updateConnUI() {
+    if (connOffline()) {
+      els.connChip.textContent = `Offline · ${queue.length} queued`;
+      els.connChip.hidden = false;
+    } else {
+      els.connChip.hidden = true;
+    }
+    updateStaleBanner();
+    updateStuckUI();
+  }
+
+  function updateStaleBanner() {
+    if (loadState !== "snapshot" || snapshotFetchedAt == null) { els.staleBanner.hidden = true; return; }
+    els.staleBanner.textContent = `Showing data from ${relAge(snapshotFetchedAt)} — will refresh when online`;
+    els.staleBanner.hidden = false;
+  }
+
+  const stuckQueueItems = () => queue.filter((it) => !it.flushable && it.stuck);
+
+  /** Poison items parked by the flush/replay: keep them visible until resolved. */
+  function updateStuckUI() {
+    const stuck = stuckQueueItems();
+    if (!stuck.length) { els.stuckBanner.hidden = true; return; }
+    const n = stuck.length;
+    const hasBody = stuck.some((it) => allTxns.some((t) => t.id === it.id));
+    els.stuckBanner.textContent = hasBody
+      ? `${n} change${n === 1 ? "" : "s"} couldn't sync — tap to re-sort`
+      : n === 1 ? "1 change couldn't sync — discard this change" : `${n} changes couldn't sync — tap to discard`;
+    els.stuckBanner.hidden = false;
+  }
+
+  /** Re-sort when the txn body is still around (clearing the queue entry puts it
+   *  back in the deck — eligible() stops excluding it); otherwise the only honest
+   *  option left is discarding the change. Bodiless items survive a re-sort tap
+   *  and get the discard copy on the next updateStuckUI pass. */
+  function onStuckTap() {
+    const stuck = stuckQueueItems();
+    if (!stuck.length) return;
+    const withBody = stuck.filter((it) => allTxns.some((t) => t.id === it.id));
+    const clearing = withBody.length ? withBody : stuck;
+    const keys = new Set(clearing.map(keyOf));
+    queueWriteSync((q) => {
+      for (let i = q.length - 1; i >= 0; i--) {
+        const it = q[i];
+        if (it && keys.has(keyOf(it))) q.splice(i, 1);
+      }
+    });
+    if (withBody.length) {
+      reconcile(); // the cleared txns re-enter the deck
+      note("Back in the deck — sort again");
+    } else {
+      note(clearing.length === 1 ? "Change discarded" : "Changes discarded");
+    }
+    updateConnUI();
+  }
+
   // ---------- error routing ----------
   /** LMError 401 -> Settings naming the dead token; missing token -> onboarding.
    *  (The old Access-expiry overlay is gone: API calls are cross-origin now, so a
@@ -1731,16 +2099,20 @@ function main() {
     // 2) keepalive flush of current-snapshot flushable items only; the rest stays
     //    in localStorage (recheck-based replay covers it on next open)
     flush("hidden");
-    // 3) badge = remaining at close; suggestion stamp = seen through this visit
-    if (badgeEnabled && stateLoaded) setBadge(set.length + backlog.length);
-    if (stateLoaded) updateSugStamp();
+    // 3) badge = remaining at close; suggestion stamp = seen through this visit.
+    //    Both LIVE only — a snapshot deck's counts describe stale data.
+    if (badgeEnabled && loadState === "live") setBadge(set.length + backlog.length);
+    if (loadState === "live") updateSugStamp();
   }
   function onVisible() {
     setBadge(0); // cleared on open — the badge means "remaining at last close"
     if (pendingFinalize) {
-      pendingFinalize.flushable = true;
+      const { id, ts } = pendingFinalize; // by (id,ts): the ref may be a detached copy
       pendingFinalize = null;
-      persistQueue();
+      queueWriteSync((q) => {
+        const f = q.find((it) => it.id === id && it.ts === ts);
+        if (f) f.flushable = true;
+      });
       maybeThresholdFlush();
     }
     if (lastHiddenAt && Date.now() - lastHiddenAt > REFRESH_AWAY_MS) {
@@ -1764,8 +2136,13 @@ function main() {
       const merchant = (u.txn.merchant || "").trim();
       if (!merchant) return;
       // stays attached to the queue item: the rule is only saved once the decision sticks
-      u.item.make_rule = { pattern: merchant, match_type: "contains" };
-      persistQueue();
+      const mr = { pattern: merchant, match_type: /** @type {"contains"|"exact"} */ ("contains") };
+      u.item.make_rule = mr; // display copy; the persisted item is looked up fresh by (id,ts)
+      const { id, ts } = u.item;
+      queueWriteSync((q) => {
+        const f = q.find((it) => it.id === id && it.ts === ts);
+        if (f) f.make_rule = mr;
+      });
       els.ruleChip.textContent = "✓ Rule will be saved";
       els.ruleChip.classList.add("saved");
       els.ruleChip.disabled = true;
@@ -1807,10 +2184,12 @@ function main() {
     els.settingsSave.addEventListener("click", saveSettings);
     els.forgetBtn.addEventListener("click", onForgetTokens);
     els.lmTokenInput.addEventListener("change", () => {
+      disarmSaveAnyway(); // edited token: the unverified-save consent no longer applies
       const v = els.lmTokenInput.value.trim();
       if (v) validateTokenField("lm", v);
     });
     els.orTokenInput.addEventListener("change", () => {
+      disarmSaveAnyway();
       const v = els.orTokenInput.value.trim();
       if (v) validateTokenField("or", v);
     });
@@ -1820,8 +2199,9 @@ function main() {
       if (els.webBar.dataset.mode === "hint") { openSettingsSheet(null); return; }
       // explicit spend consent: grant allowance for everything currently pending
       webExtraAllowance += Math.max(0, pendingWebKeys().size - webBudget());
-      maybeWebCheck();
+      maybeWebCheck(true); // explicit user action: always try the network
     });
+    els.stuckBanner.addEventListener("click", onStuckTap);
     els.badgeToggle.addEventListener("change", async () => {
       badgeEnabled = els.badgeToggle.checked;
       try { localStorage.setItem(LS.badge, badgeEnabled ? "1" : "0"); } catch { /* session-only then */ }
@@ -1926,22 +2306,80 @@ function main() {
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) onHidden(); else onVisible();
     });
+
+    // connectivity events are HINTS: they recount the chip and trigger a probe;
+    // the reducer's verdict only ever moves on real fetch outcomes.
+    window.addEventListener("online", () => { connSettle(); scheduleOnlineResync(); });
+    window.addEventListener("offline", connSettle);
+    window.addEventListener("pageshow", (e) => {
+      if (!e.persisted) return; // fresh loads boot through init()
+      // bfcache restore: another tab may have moved the queue while we were frozen
+      queue = queueLoad();
+      connSettle();
+      scheduleOnlineResync(); // probe — the frozen tab's verdict is stale
+      onVisible();
+    });
+    window.addEventListener("storage", (e) => {
+      if (e.key !== null && e.key !== LS_KEYS.queue) return;
+      queue = queueLoad(); // cross-tab queue move: refresh the in-memory view + counts
+      updateConnUI();
+    });
   }
 
   // ---------- boot ----------
+  /** Offline boot: deck from the last saved snapshot. lastFetchTs stays null and
+   *  snapshotIds stays empty ON PURPOSE — decisions made against stale data get
+   *  snapshotTs:null, which routes them through the recheck-based replay only
+   *  (the no-recheck keepalive flush is structurally unreachable for them).
+   *  @param {NonNullable<Awaited<ReturnType<typeof assembleFromSnapshot>>>} snap */
+  function enterSnapshotMode(snap) {
+    categories = snap.categories;
+    catById = new Map(categories.map((c) => [c.id, c]));
+    accounts = snap.accounts;
+    acctByKey = new Map(accounts.map((a) => [a.key, a]));
+    allTxns = /** @type {Txn[]} */ (snap.transactions);
+    loadState = "snapshot";
+    snapshotFetchedAt = snap.fetchedAt;
+    stateError = null;
+    backfillRuleNames();
+    backlog = eligible(allTxns).sort(byConfDesc);
+    dealSet();
+    dealAnim = true;
+    renderStack();
+    updateMeters();
+    updateConnUI(); // stale banner + chip; the 5-min refresh interval is the way out
+  }
+
   async function retryLoad() {
     stateError = null;
     renderStack();
+    /** @type {unknown} */
+    let failure = null;
     try {
       await fetchState();
     } catch (e) {
+      failure = e ?? new Error("Couldn't load");
+      if (!isNoTokenErr(e)) noteConnOutcome("lm", e);
+    }
+    if (failure !== null) {
+      const e = failure;
+      // Routed failures (no token / dead token) keep current behavior — onboarding
+      // or Settings explain them; a snapshot deck underneath would imply the token
+      // still works. Everything else falls back to the offline snapshot.
+      const routed = routeLMError(e);
+      if (!routed) {
+        let snap = null;
+        try { snap = await assembleFromSnapshot(rules); } catch { snap = null; }
+        if (snap) { enterSnapshotMode(snap); return; }
+      }
       // The sheet/onboarding card explains the problem, but the deck must not stay
       // a silent skeleton behind it: render an actionable error card too, so
       // dismissing the sheet leaves a "Try again" path.
-      routeLMError(e);
       stateError = e instanceof LMError && e.tokenInvalid
         ? new Error("Lunch Money rejected the token")
-        : e instanceof Error ? e : new Error("Couldn't load");
+        : !routed && connOffline()
+          ? new Error("You're offline — dopo needs one online visit to get your transactions")
+          : e instanceof Error ? e : new Error("Couldn't load");
       renderStack();
       return;
     }
@@ -1960,6 +2398,8 @@ function main() {
     bindUI();
     setupServiceWorker();
     setBadge(0); // badge means "remaining at last close" — clear on open
+    // Best-effort eviction protection for the queue/snapshot (browser may ignore it).
+    try { navigator.storage?.persist?.().catch(() => { /* advisory only */ }); } catch { /* unsupported */ }
     // Later pile: pointers in localStorage, bodies in IndexedDB; lib/store.js
     // migrates legacy full-txn entries and compacts evicted pointers itself.
     try {
@@ -1969,22 +2409,41 @@ function main() {
     updateStreakUI(false);
     renderStack(); // loading skeleton
     updateMeters();
+    updateConnUI(); // last session's queue may already warrant the offline chip
 
     if (!tokens.lm) showOnboarding();
 
-    // 1) replay the persisted queue first — items that had live undo toasts at
-    //    death are included; their `skipped` results are swallowed silently.
-    //    Server-era items (snapshotTs null) replay through the same membership recheck.
+    // 1) replay the persisted queue first — lib/sync.js owns the lock scope, the
+    //    single membership recheck, and poison isolation; app.js keeps only the UI
+    //    routing. Items that had live undo toasts at death are included (replay
+    //    marks everything flushable). Server-era items (snapshotTs null) replay
+    //    through the same recheck.
     if (queue.length && tokens.lm) {
-      for (const it of queue) it.flushable = true;
-      persistQueue();
-      await flush("replay");
+      try {
+        const res = await replayQueue(tokens.lm, {
+          onApplied: () => { queue = queueLoad(); updateConnUI(); }, // live chip count per chunk
+        });
+        queue = queueLoad(); // replay removed/parked items under its own lock; our refs are stale by design
+        rules = rulesLoad(); // make_rule absorption wrote through store.ruleAdd
+        noteConnOutcome("lm", null);
+        // sent:false skips are honest news (someone else — or another tab — got
+        // there first); sent:true skips are our own earlier sends, kept silent.
+        if (res.skippedUnsent.length) note(`${res.skippedUnsent.length} already categorized elsewhere ✓`);
+      } catch (e) {
+        queue = queueLoad(); // partial progress persisted before the throw
+        rules = rulesLoad();
+        noteConnOutcome("lm", e);
+        routeLMError(e); // unrouted failures stay quiet — the next flush/refresh retries
+      }
+      updateConnUI(); // stuck surface + chip recount after replay
     }
 
     // 2) fetch state, 3) deal
     await retryLoad();
 
     setInterval(() => {
+      // KEEPS RUNNING while offline — this interval and onVisible are the recovery
+      // probes; the unreliable `online` event must never be the only way back.
       if (!document.hidden && !sheetOpenNow() && !dragCtx) refresh();
     }, REFRESH_EVERY_MS);
   }

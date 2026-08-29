@@ -15,6 +15,7 @@
 <header class="top">
   <div class="brand">dopo</div>
   <div class="streak" id="streak" hidden aria-label="streak">🔥<span id="streakN">0</span></div>
+  <div class="chip conn-chip" id="connChip" hidden aria-live="polite"></div>
   <button class="chip" id="laterChip" hidden>💤 Later · <span id="laterN">0</span></button>
   <div class="menu">
     <button id="menuBtn" aria-label="Menu" aria-haspopup="true">⋯</button>
@@ -31,6 +32,8 @@
   <div class="progress-fill" id="progressFill"></div>
 </div>
 <div class="meter" id="meter">loading…</div>
+<div class="stale-banner" id="staleBanner" hidden></div>
+<button class="stuck-banner" id="stuckBanner" type="button" hidden></button>
 
 <main class="stage" id="stage">
   <div class="stack" id="stack" aria-live="polite"></div>
@@ -137,6 +140,8 @@
       <li>Create a <a href="https://my.lunchmoney.app/developers" target="_blank" rel="noopener">Lunch&nbsp;Money API token</a> (required).</li>
       <li>Optionally create an <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">OpenRouter key</a> for AI suggestions — use a dedicated key with a spend limit.</li>
     </ol>
+    <p class="onboard-offline">You'll need to be online this first time — after that, dopo keeps
+      working offline and syncs your sorting when you're back.</p>
     <button id="onboardOpen">Paste tokens</button>
   </div>
 </div>

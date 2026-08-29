@@ -63,12 +63,26 @@ suggestions.
 - On iOS, Safari may evict site data (including the merchant cache) after ~7 days of non-use —
   see below.
 
+## Offline first
+
+dopo works without a connection. The app shell is cached by the service worker, the deck renders
+from the last fetched snapshot (with a banner showing its age), and every swipe is saved on the
+device the moment you make it — then synced to Lunch Money when you're back online. An
+"Offline · N queued" chip shows what's waiting; before anything queued is written upstream, dopo
+re-checks that each transaction is still uncategorized, so a decision made offline never
+overwrites categorization done elsewhere in the meantime. AI suggestions need the network and
+pause while offline; sorting by hand keeps working.
+
 ## iOS: Add to Home Screen
 
-Install the app (Share → **Add to Home Screen**). Installed PWAs get durable storage; a plain Safari
-tab's storage can be evicted after 7 days without a visit, which would drop your tokens, local rules
-and merchant cache. Everything important to your budget is in Lunch Money either way — eviction
-costs you convenience, not data.
+Install the app (Share → **Add to Home Screen**). Installed PWAs get durable storage (dopo also
+requests `navigator.storage.persist()` at boot); a plain Safari tab's storage can be evicted after
+7 days without a visit — and that eviction removes *everything together*: tokens, local rules,
+merchant cache, the offline snapshot, any not-yet-synced queue, and the service worker itself, so
+offline boot is impossible afterward anyway. Everything already synced is in Lunch Money either
+way — eviction costs you convenience (and any unsynced queue), not your budget data. Note the
+installed app and Safari use separate storage: a token pasted in Safari doesn't exist in the
+installed app, and queued changes sync per container.
 
 ## Self-hosting
 

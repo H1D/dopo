@@ -24,15 +24,19 @@ dopo.artems.net (assets-only Worker; works equally behind an auth proxy). ES mod
     forbidden `Referer`), `"X-Title": "dopo"`.
 - `lib/rules.js`, `lib/clean.js` — ports of rule matching + payee cleaning (pure, fixture-tested).
 - `lib/store.js` — storage: tokens + apply queue + Later pile pointers in localStorage;
-  suggestion cache + Later bodies in IndexedDB (~2000-entry LRU, per-entry writes).
+  suggestion cache + Later bodies + state snapshot in IndexedDB (~2000-entry LRU, per-entry writes).
+- `lib/sync.js` — shared queue replay (boot replay + table apply): one membership recheck,
+  chunked PUTs, poison-item isolation, make_rule absorption. Throws typed errors, never touches UI.
 - `data.js` — orchestration: state assembly, rules-first classification, two-pass scheduling, cache.
 - `app.js` (NEW NAME, was swipe.js) + `app.css` (was swipe.css) + `boot.js` (SW registration; NO inline
   scripts anywhere). New filenames are deliberate: old installed SWs precache /swipe.js//api.js
   cache-first; new names bypass the stale cache so the new app boots on the first post-cutover visit.
 - `sw.js` (path unchanged — required for update detection): precache derived from
   `self.registration.scope`; `VERSION = "__DOPO_VERSION__"` placeholder stamped at deploy;
-  exception-only offline fallback (unchanged semantics); `/api` interception rules removed
-  (there is no API); connect-src does not include foreign origins for the SW itself.
+  exception-only offline fallback: on navigation fetch REJECTION (never on status/type)
+  serve the cached shell mapped by pathname (scope root/index.html → index.html,
+  table.html → table.html, else offline.html, else Response.error()); `/api` interception
+  rules removed (there is no API); connect-src does not include foreign origins for the SW itself.
 
 ## Two-pass classification
 
@@ -53,10 +57,57 @@ dopo.artems.net (assets-only Worker; works equally behind an auth proxy). ES mod
 - Items carry `snapshotTs` = timestamp of the last successful state fetch they were decided against.
 - Normal flush: recheck mode "membership" (with per-id fallback) before PUT.
 - Hidden/pagehide flush: NO network recheck — but eligibility is restricted to items whose `snapshotTs`
-  equals the CURRENT session's last successful fetch; validate against the in-memory snapshot
-  synchronously, ONE keepalive PUT (≤20 items, <64KB). Items from older sessions stay queued for the
-  recheck-based replay on next open. This is what makes "keepalive without recheck" safe: LM's PUT
-  overwrites, so an unvalidated stale item could clobber a category set elsewhere since.
+  equals the CURRENT session's last successful fetch AND that fetch is fresh (< 2× the refresh
+  interval, i.e. 10 min — an online-boot-then-offline session must not keep arming no-recheck PUTs
+  against an aging snapshot); validate against the in-memory snapshot synchronously, ONE keepalive
+  PUT (≤20 items, <64KB). Items from older sessions stay queued for the recheck-based replay on next
+  open. This is what makes "keepalive without recheck" safe: LM's PUT overwrites, so an unvalidated
+  stale item could clobber a category set elsewhere since.
+
+## Offline-first (vetted 2 rounds, 2 personas)
+
+The app boots and works fully offline; every state change lands in durable local storage
+synchronously/immediately and syncs upstream when connectivity allows. Lunch Money stays the
+source of truth for transaction data; the device is the source of truth for pending decisions.
+
+- **Queue write classes.** Decision-path writes (swipe decide, undo, finalize, pagehide
+  sent-marking) are SYNCHRONOUS fresh-read-merge `queueLoad → modify → queueSave` — never behind
+  an async lock (a blocked lock grant must not be able to lose a swipe; pagehide callbacks may
+  never run). Slow multi-step read-modify-write paths (replay, table bulk push, flush persistence
+  steps) go through `queueMutate(fn)` under `navigator.locks("dopo.queue")`; `fn` is synchronous;
+  the lock is never held across network I/O; saves collapse duplicate ids (max ts wins). Item
+  identity is `(id, ts)` — never object references.
+- **Snapshot.** The last successful raw `LMState` is saved to IndexedDB after every fetch
+  (skip-unchanged still bumps `fetchedAt`); on a network-class boot failure the deck renders from
+  it in snapshot mode with a stale banner. In snapshot mode `lastFetchTs` stays null → decisions
+  carry `snapshotTs: null` → they sync ONLY through the recheck-based replay, never keepalive.
+  Applied/skipped ids are pruned from the snapshot after every successful flush so stale
+  snapshots don't resurrect finished work. A 401 is never papered over with a snapshot.
+- **Connectivity is derived from fetch outcomes**, not `online`/`offline` events: an
+  `LMError`/OR error with a real HTTP status means the server is reachable; a fetch rejection or
+  parse-garbage response (captive portal) counts toward offline (2 consecutive LM-origin failures
+  or `navigator.onLine === false` shows the chip; any success clears it). The events and
+  `navigator.onLine` only trigger probes. While offline the retry toast is suppressed and backoff
+  pauses; the 5-minute refresh interval and the return-to-foreground path keep running as quiet
+  recovery probes.
+- **Poison isolation.** A chunk PUT failing with a 4xx other than 401/408/429 is bisected (PUT
+  stage only — the membership recheck already ran); after 3 session attempts the item is parked
+  `flushable:false, stuck:"<reason>"` and surfaced, so one bad item can't jam the queue. 408/429
+  stay on the ordinary backoff path.
+- **Replay honesty.** Recheck-skipped items that were never sent by this client
+  (`sent:false`) are announced ("already categorized elsewhere"); `sent:true` skips are silent.
+- **IDB v2 upgrade safety.** `onblocked` does not latch memory-only mode (per-op ~2s watchdog
+  degrades single calls without poisoning the cached open); every open registers
+  `onversionchange → close`; Later-pointer compaction is forbidden whenever bodies may have been
+  written to the memory fallback — "IDB confirmed gone" ≠ "couldn't reach IDB".
+- **Accepted trade-offs:** boot replay marks everything flushable, so decisions from a killed
+  session sync without an undo window; a transaction re-uncategorized remotely will accept a
+  stale queued decision; the table view has no snapshot mode (shell + queued-count banner only);
+  iOS standalone and Safari-tab containers are isolated — queue and chip counts don't span them;
+  a sheet left open >10 min ages out keepalive eligibility (sync defers to replay); the snapshot
+  comparator misses in-place edits on identical id-sets (next content change repairs); offline
+  boot works from the second visit after a deploy (the new SW must activate first — do not "fix"
+  with skipWaiting).
 
 ## Settings / onboarding
 

@@ -42,6 +42,7 @@ const PRECACHE = [
   "lib/rules.js",
   "lib/clean.js",
   "lib/store.js",
+  "lib/sync.js",
   "offline.html",
   "offline.css",
   "table.html",
@@ -123,7 +124,18 @@ self.addEventListener("fetch", (event) => {
         return (await event.preloadResponse) ?? (await fetch(req));
       } catch {
         // EXCEPTION-ONLY fallback: the fetch itself rejected (truly offline).
-        const cached = await caches.match(OFFLINE_PATH, { cacheName: CACHE }).catch(() => undefined);
+        // Map the REQUEST pathname (never the response) to a cached shell so the
+        // app still boots offline; offline.html stays the last resort.
+        const path = url.pathname;
+        const root = scoped("./");
+        let shell;
+        if (path === root || path + "/" === root || path === scoped("index.html")) {
+          shell = scoped("index.html");
+        } else if (path === scoped("table.html")) {
+          shell = scoped("table.html");
+        }
+        const fromCache = (p) => caches.match(p, { cacheName: CACHE }).catch(() => undefined);
+        const cached = (shell && (await fromCache(shell))) || (await fromCache(OFFLINE_PATH));
         return cached || Response.error();
       }
     })());

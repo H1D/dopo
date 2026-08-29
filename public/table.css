@@ -24,6 +24,7 @@ td.amount { text-align: right; font-variant-numeric: tabular-nums; white-space: 
 .raw.open { white-space: normal; word-break: break-all; }
 select { font: inherit; padding: 5px 6px; border: 1px solid var(--line); border-radius: 6px; max-width: 230px; background: var(--card); }
 .status { color: var(--muted); margin-left: 8px; }
+.queued { padding: 8px 20px; background: var(--warn-bg); color: var(--warn); border-bottom: 1px solid var(--line); font-size: 13px; }
 section.rules { margin-top: 28px; }
 section.rules h2 { font-size: 14px; }
 .rules-note { color: var(--muted); font-size: 12px; margin: 4px 0 10px; }
