@@ -67,7 +67,9 @@ export async function assembleState(token, rules) {
   const raw = await getState(token);
   // Offline fallback: persist the RAW state (before decoration) after every
   // successful fetch. Best-effort — snapshotSave never throws.
-  await snapshotSave(raw);
+  // fire-and-forget: never-throwing best-effort write, and a multi-MB IDB clone
+  // must not sit on the first-render latency path
+  void snapshotSave(raw);
   /** @type {DeckTxn[]} */
   const txns = raw.transactions.map((t) => ({
     ...t,

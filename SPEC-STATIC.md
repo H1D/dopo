@@ -100,8 +100,9 @@ source of truth for transaction data; the device is the source of truth for pend
   degrades single calls without poisoning the cached open); every open registers
   `onversionchange → close`; Later-pointer compaction is forbidden whenever bodies may have been
   written to the memory fallback — "IDB confirmed gone" ≠ "couldn't reach IDB".
-- **Accepted trade-offs:** boot replay marks everything flushable, so decisions from a killed
-  session sync without an undo window; a transaction re-uncategorized remotely will accept a
+- **Accepted trade-offs:** any replay (boot, or another tab's table apply) marks everything
+  flushable, so decisions from a killed session sync without an undo window and a replay in a
+  sibling tab can finalize this tab's live undo toast early; a transaction re-uncategorized remotely will accept a
   stale queued decision; the table view has no snapshot mode (shell + queued-count banner only);
   iOS standalone and Safari-tab containers are isolated — queue and chip counts don't span them;
   a sheet left open >10 min ages out keepalive eligibility (sync defers to replay); the snapshot

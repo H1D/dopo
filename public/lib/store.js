@@ -388,6 +388,9 @@ const SUG_STORE = "suggestions";
 const LATER_STORE = "later";
 const SNAP_STORE = "snapshot";
 const SNAP_KEY = "state";
+// Tiny sidecar bumped instead of re-putting the multi-MB state record when the
+// content is unchanged (IDB structured-clones the whole value on every put).
+const SNAP_META_KEY = "state-meta";
 /** ~2000 entries keeps the cache well under any browser quota while covering months. */
 export const CACHE_MAX_ENTRIES = 2000;
 /** Per-op watchdog: a v1→v2 upgrade blocked by another open tab must degrade the
@@ -538,8 +541,12 @@ async function idbOp(storeName, mode, fn) {
       req.onsuccess = () => resolve({ ok: true, value: req.result });
       req.onerror = () => reject(req.error);
     });
-  } catch {
-    memoryOnly = true;
+  } catch (e) {
+    // A connection closed under us by onversionchange (sibling tab upgrading)
+    // throws InvalidStateError at db.transaction — that's "reopen next call"
+    // (dbPromise is already nulled), not "storage is broken": same policy as a
+    // blocked open. Everything else latches the session to memory-only.
+    if (!(e instanceof DOMException && e.name === "InvalidStateError")) memoryOnly = true;
     return null;
   }
 }
@@ -811,7 +818,9 @@ export async function snapshotSave(state, now = Date.now()) {
       const get = store.get(SNAP_KEY);
       get.onsuccess = () => {
         const prev = get.result;
-        store.put(sameSnapshotContent(prev, rec) ? { ...prev, fetchedAt: now } : rec);
+        // unchanged content: bump the sidecar only — never re-clone the big record
+        if (sameSnapshotContent(prev, rec)) store.put({ key: SNAP_META_KEY, fetchedAt: now });
+        else store.put(rec);
       };
       get.onerror = () => reject(get.error);
     });
@@ -829,6 +838,13 @@ export async function snapshotLoad() {
     const res = await idbOp(SNAP_STORE, "readonly", (s) => s.get(SNAP_KEY));
     const rec = res !== null ? res.value : memSnap;
     if (!isSnapshotRecord(rec)) return null;
+    // fetchedAt = the later of the record itself and the skip-unchanged sidecar
+    let metaAt = 0;
+    if (res !== null) {
+      const meta = await idbOp(SNAP_STORE, "readonly", (s) => s.get(SNAP_META_KEY));
+      const m = meta !== null ? /** @type {{fetchedAt?: unknown}|undefined} */ (meta.value) : undefined;
+      if (m && typeof m.fetchedAt === "number") metaAt = m.fetchedAt;
+    }
     const txns = /** @type {import("./lm.js").LMTransaction[]} */ (
       rec.transactions.filter((t) => typeof t === "object" && t !== null && typeof (/** @type {{id?: unknown}} */ (t).id) === "number")
     );
@@ -836,7 +852,7 @@ export async function snapshotLoad() {
       categories: /** @type {import("./lm.js").LeafCategory[]} */ (rec.categories),
       accounts: /** @type {import("./lm.js").LMAccount[]} */ (rec.accounts),
       transactions: txns,
-      fetchedAt: rec.fetchedAt,
+      fetchedAt: Math.max(rec.fetchedAt, metaAt),
       truncated: rec.truncated === true,
       total: typeof rec.total === "number" ? rec.total : null,
     };
@@ -888,4 +904,5 @@ export async function snapshotPrune(ids) {
 export async function snapshotClear() {
   memSnap = null;
   await idbOp(SNAP_STORE, "readwrite", (s) => s.delete(SNAP_KEY));
+  await idbOp(SNAP_STORE, "readwrite", (s) => s.delete(SNAP_META_KEY));
 }

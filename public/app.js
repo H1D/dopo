@@ -189,6 +189,7 @@ function main() {
   let dragCtx = null;
   let lastHiddenAt = 0;
   let backoffIdx = 0;
+  let bootReplaying = false; // boot replayQueue in flight — flush() must not race it
   /** @type {ReturnType<typeof setTimeout>|null} */
   let flushTimer = null;
   /** @type {Set<string>} */
@@ -709,8 +710,12 @@ function main() {
   /** @param {string} reason */
   async function flush(reason) {
     if (!tokens.lm) return;
+    if (bootReplaying) return; // replayQueue owns the queue right now; later triggers cover the rest
     if (reason === "hidden") { flushHidden(tokens.lm); return; }
     const lmToken = tokens.lm;
+    // reconnects often drain via the 5-min probe, not the online event — the
+    // "Synced" reassurance must fire for both
+    const cameFromOffline = connOffline();
     const selected = queue.filter((it) => it.flushable && !it.stuck && !inflight.has(keyOf(it)));
     if (!selected.length) return;
     const prevSent = new Set(selected.filter((it) => it.sent).map((it) => it.id));
@@ -745,9 +750,12 @@ function main() {
       return;
     }
     if (checked.skipped.length) {
-      // already categorized elsewhere / deleted: drop + prune, nothing to PUT
+      // already categorized elsewhere / deleted: drop + prune, nothing to PUT.
+      // Removal is by (id,ts) KEY, batch items only — a superseding same-id decision
+      // another tab queued meanwhile survives for its own recheck verdict.
       const done = new Set(checked.skipped);
-      try { queue = await queueMutate((q) => q.filter((it) => !done.has(it.id))); }
+      const dropKeys = new Set(batch.filter((it) => done.has(it.id)).map(keyOf));
+      try { queue = await queueMutate((q) => q.filter((it) => !dropKeys.has(keyOf(it)))); }
       catch { storageFailed(); }
       for (const it of batch) if (done.has(it.id)) inflight.delete(keyOf(it));
       snapshotPrune(checked.skipped).catch(() => { /* best-effort; redone next flush */ });
@@ -762,7 +770,9 @@ function main() {
         const res = await putChunkIsolating(lmToken, chunk);
         const applied = new Set(res.applied);
         absorbMakeRules(chunk, res.applied);
-        try { queue = await queueMutate((q) => q.filter((it) => !applied.has(it.id))); }
+        // remove by (id,ts) key — never delete a newer same-id entry we didn't send
+        const appliedKeys = new Set(chunk.filter((it) => applied.has(it.id)).map(keyOf));
+        try { queue = await queueMutate((q) => q.filter((it) => !appliedKeys.has(keyOf(it)))); }
         catch { storageFailed(); }
         for (const it of chunk) inflight.delete(keyOf(it));
         if (res.applied.length) snapshotPrune(res.applied).catch(() => { /* best-effort */ });
@@ -771,7 +781,7 @@ function main() {
       noteConnOutcome("lm", null);
       backoffIdx = 0;
       if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-      if (reason === "online" && appliedCount) note(`Synced ${appliedCount} ✓`);
+      if ((reason === "online" || cameFromOffline) && appliedCount) note(`Synced ${appliedCount} ✓`);
       if (checked.skipped.length) absorbSkipped(checked.skipped, prevSent);
       updateConnUI();
     } catch (e) {
@@ -810,10 +820,12 @@ function main() {
       .then((res) => {
         const done = new Set([...res.applied, ...res.skipped]);
         absorbMakeRules(batch, res.applied);
+        // remove by (id,ts) key — a newer same-id entry from another tab survives
+        const doneKeys = new Set(batch.filter((it) => done.has(it.id)).map(keyOf));
         queueWriteSync((q2) => {
           for (let i = q2.length - 1; i >= 0; i--) {
             const it = q2[i];
-            if (it && done.has(it.id)) q2.splice(i, 1);
+            if (it && doneKeys.has(keyOf(it))) q2.splice(i, 1);
           }
         });
         for (const it of batch) inflight.delete(keyOf(it));
@@ -2001,7 +2013,8 @@ function main() {
    *  stuck banner. Cheap — safe to call from every decision/flush/event path. */
   function updateConnUI() {
     if (connOffline()) {
-      els.connChip.textContent = `Offline · ${queue.length} queued`;
+      // stuck items won't sync by themselves — the stuck banner owns those
+      els.connChip.textContent = `Offline · ${queue.filter((it) => !it.stuck).length} queued`;
       els.connChip.hidden = false;
     } else {
       els.connChip.hidden = true;
@@ -2377,7 +2390,9 @@ function main() {
       // dismissing the sheet leaves a "Try again" path.
       stateError = e instanceof LMError && e.tokenInvalid
         ? new Error("Lunch Money rejected the token")
-        : !routed && connOffline()
+        : !routed && (connOffline() || !(e instanceof LMError))
+          // network-class failure (rejection or captive-portal garbage): friendly
+          // copy even before the streak crosses the chip threshold — never parser vomit
           ? new Error("You're offline — dopo needs one online visit to get your transactions")
           : e instanceof Error ? e : new Error("Couldn't load");
       renderStack();
@@ -2419,6 +2434,8 @@ function main() {
     //    marks everything flushable). Server-era items (snapshotTs null) replay
     //    through the same recheck.
     if (queue.length && tokens.lm) {
+      bootReplaying = true; // flush() no-ops meanwhile — an `online` event mid-replay
+      // must not double-send the same items and mis-announce them as "already done"
       try {
         const res = await replayQueue(tokens.lm, {
           onApplied: () => { queue = queueLoad(); updateConnUI(); }, // live chip count per chunk
@@ -2435,6 +2452,7 @@ function main() {
         noteConnOutcome("lm", e);
         routeLMError(e); // unrouted failures stay quiet — the next flush/refresh retries
       }
+      bootReplaying = false;
       updateConnUI(); // stuck surface + chip recount after replay
     }
 
