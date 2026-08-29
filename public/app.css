@@ -946,3 +946,45 @@ header.top {
 @media (prefers-color-scheme: dark) {
   .webbar[data-mode="webcheck"] button { color: #8ab4ff; }
 }
+
+/* ---------- offline / sync status (S6) ---------- */
+
+/* header chip: persistent "Offline · N queued" (aria-live polite in markup) */
+.conn-chip {
+  color: var(--warn);
+  background: var(--warn-bg);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+  white-space: nowrap;
+}
+
+/* snapshot-mode banner under the meter: "Showing data from <age>" */
+.stale-banner {
+  margin: 6px auto 0;
+  width: fit-content;
+  max-width: 92vw;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warn);
+  background: var(--warn-bg);
+  border: 1px solid color-mix(in srgb, var(--warn) 25%, transparent);
+  border-radius: 999px;
+  padding: 4px 12px;
+  text-align: center;
+}
+
+/* poison-item surface: "N changes couldn't sync — tap to re-sort / discard" */
+.stuck-banner {
+  display: block;
+  margin: 6px auto 0;
+  width: fit-content;
+  max-width: 92vw;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--out-red);
+  background: color-mix(in srgb, var(--out-red) 10%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--out-red) 35%, transparent);
+  border-radius: 999px;
+  padding: 6px 14px;
+  text-align: center;
+}
+.stuck-banner:active { transform: scale(.97); }
