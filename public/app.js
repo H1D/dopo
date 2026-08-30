@@ -25,7 +25,7 @@ import { assembleState, assembleFromSnapshot, classifyPass1, webCheck, merchantK
 import {
   esc, splitEmoji, fmtAmountText, isConfident as cardConfident, cardHTML, CONFIDENT_AT,
 } from "./lib/card.js";
-import { createDust } from "./lib/dust.js";
+import { createDust, heft, referenceAmount } from "./lib/dust.js";
 
 /** @typedef {import("./data.js").DeckTxn} Txn */
 /** @typedef {import("./data.js").UISuggestion} UISuggestion */
@@ -212,6 +212,8 @@ function main() {
    *  rather than DOM identity because the top card is rebuilt in place when a
    *  late suggestion arrives — that must not read as a new card landing. */
   let lastTopId = "";
+  /** Median absolute amount of the loaded deck; heft() scores against it. */
+  let amountRef = 0;
   let onboardingActive = false; // missing LM token -> "Connect Lunch Money" card
   /** @type {Set<"lm"|"or">} */
   const deadTokenNoted = new Set(); // dead tokens already routed to Settings this session
@@ -392,6 +394,9 @@ function main() {
     accounts = data.accounts;
     acctByKey = new Map(accounts.map((a) => [a.key, a]));
     allTxns = data.transactions;
+    // Reference for how heavy a landing feels. Recomputed per fetch so it
+    // tracks whatever is actually in the deck rather than a hardcoded amount.
+    amountRef = referenceAmount(allTxns);
     lastFetchTs = Date.now();
     snapshotIds = new Set(allTxns.map((t) => t.id));
     loadState = "live";
@@ -1154,7 +1159,11 @@ function main() {
       }
     });
     lastTopId = String(want[0]?.id ?? "");
-    if (landed) dust.blast(els.stack, landed);
+    // A deal drops the whole set, so it lands as heavily as its biggest card.
+    const hefted = landed === "deal"
+      ? Math.max(...want.map((t) => heft(t.amount, amountRef)))
+      : heft(want[0]?.amount, amountRef);
+    if (landed) dust.blast(els.stack, landed, hefted);
     updateActionButtons();
   }
 
