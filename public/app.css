@@ -259,11 +259,6 @@ header.top {
   transform: translateY(-18px) scale(1.03) !important;
   box-shadow: var(--shadow-lift);
 }
-/* The next card hopping into the front slot after a swipe. It starts from the
-   peek position it already occupies, so there is no teleport — it lifts, then
-   slams down with the same squash as a dealt card. Staged on the FRONT card
-   because that is the one the eye is on: an incoming card animated at the back
-   of the deck is invisible, occluded by the two opaque cards in front of it. */
 /* The next card falls in from off-screen, exactly as a dealt card does —
    same keyframes, so there is one landing in the app rather than two curves
    to keep in sync. It replaces an earlier short "hop" from the peek position.
