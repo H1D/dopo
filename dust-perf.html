@@ -39,6 +39,10 @@
   <button class="tier" data-t="2" aria-pressed="true">2 full</button>
   <button class="tier" data-t="1">1 css-only</button>
   <button class="tier" data-t="0">0 off</button>
+  <span>heft:</span>
+  <button class="heft" data-h="0" aria-pressed="true">0 typical</button>
+  <button class="heft" data-h="0.5">.5 threshold</button>
+  <button class="heft" data-h="1">1 huge</button>
   <button id="burn">simulate slow CPU: off</button>
   <button id="loop">auto-replay: off</button>
   <span class="readout" id="readout">—</span>
@@ -49,7 +53,9 @@
 </main>
 
 <script type="module">
-import { createDust, DEAL_MS } from "./lib/dust.js";
+import { createDust, DEAL_MS, QUAKE_AT } from "./lib/dust.js";
+
+let HEFT = 0; // forced heft, so the shake can be exercised without real data
 
 const stage = document.getElementById("stage");
 const stack = document.getElementById("stack");
@@ -74,7 +80,7 @@ function replay() {
     c.addEventListener("animationend", () => c.classList.remove("dealing", `deal-${i}`), { once: true });
     stack.appendChild(c);
   }
-  dust.blast(stack);
+  dust.blast(stack, "deal", HEFT);
   // sample once the sim has finished and stop() has scored the blast
   setTimeout(sample, DEAL_MS + 1600);
 }
@@ -113,7 +119,7 @@ function swipe() {
   fresh.className = "card c2";
   fresh.innerHTML = `<div class="demo">${payee}<small>Today · Checking · ${amt}</small></div>`;
   stack.appendChild(fresh);
-  dust.blast(stack, "land");
+  dust.blast(stack, "land", HEFT);
   setTimeout(sample, DEAL_MS + 1600);
 }
 
@@ -148,6 +154,11 @@ document.getElementById("swipe").addEventListener("click", swipe);
 document.addEventListener("keydown", (e) => {
   if (e.code === "Space") { e.preventDefault(); replay(); }
 });
+document.querySelectorAll(".heft").forEach((b) => b.addEventListener("click", () => {
+  HEFT = Number(b.dataset.h);
+  document.querySelectorAll(".heft").forEach((o) => o.setAttribute("aria-pressed", String(o === b)));
+  swipe();
+}));
 document.querySelectorAll(".tier").forEach((b) => b.addEventListener("click", () => {
   dust.setTier(Number(b.dataset.t));
   replay();

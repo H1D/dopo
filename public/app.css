@@ -556,6 +556,35 @@ header.top {
 /* particle sim target; sized to the deck's footprint, not the viewport */
 .dust-canvas { position: absolute; z-index: 0; pointer-events: none; }
 
+/* ---------- screen shake, for a genuinely big transaction ----------
+   Applied to body's LAYOUT children, never to body itself: body carries the
+   safe-area padding, and transforming it would make it the containing block
+   for every position:fixed overlay — pushing toasts and sheets down by the
+   notch inset on iOS. The fixed overlays are excluded deliberately; several
+   carry their own transforms (.note is translateX(-50%)) which a shake would
+   clobber, and chrome holding still while the deck jolts is what sells it.
+   Mostly vertical, decaying: the deck was dropped, not nudged sideways. */
+body.quaking > .top,
+body.quaking > .progress,
+body.quaking > .meter,
+body.quaking > .stage,
+body.quaking > .webbar,
+body.quaking > .actions {
+  animation: quake var(--quake-ms, 300ms) cubic-bezier(.36, .07, .19, .97) both;
+}
+@keyframes quake {
+  0% { transform: translate3d(0, 0, 0); }
+  14% { transform: translate3d(0, var(--quake-amp, 4px), 0); }
+  30% { transform: translate3d(calc(var(--quake-amp, 4px) * .28), calc(var(--quake-amp, 4px) * -.62), 0); }
+  46% { transform: translate3d(calc(var(--quake-amp, 4px) * -.22), calc(var(--quake-amp, 4px) * .44), 0); }
+  62% { transform: translate3d(calc(var(--quake-amp, 4px) * .14), calc(var(--quake-amp, 4px) * -.28), 0); }
+  78% { transform: translate3d(0, calc(var(--quake-amp, 4px) * .16), 0); }
+  100% { transform: translate3d(0, 0, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.quaking > * { animation: none; }
+}
+
 /* contact shadow — the ground reacting is half of why the drop reads as heavy */
 .dust-ground {
   position: absolute;
