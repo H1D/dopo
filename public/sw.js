@@ -9,9 +9,11 @@
  *   opaqueredirect / status-0 (nav fetches use redirect mode "manual"; the
  *   browser follows the Access→IdP chain natively). The offline fallback is
  *   served ONLY when the fetch REJECTS — never based on status/ok/type.
- * - Install fetches with {redirect:"manual", cache:"reload"} and rejects
- *   anything that isn't a 200 with a sane content-type — an Access login page
- *   (text/html) must never be cached as app.js.
+ * - Install fetches with {redirect:"follow", cache:"reload"} and rejects
+ *   anything that isn't a SAME-ORIGIN 200 with a sane content-type — an Access
+ *   login chain ends off-origin and fails install; a login page (text/html)
+ *   must never be cached as app.js. (Follow, not manual: static hosts
+ *   canonicalize .html URLs with redirects — Cloudflare assets 307s them.)
  * - No skipWaiting() at install: only on an explicit SKIP_WAITING message
  *   (the page shows an "update ready" toast and sends it on user consent).
  *
@@ -76,15 +78,25 @@ self.addEventListener("install", (event) => {
     const cache = await caches.open(CACHE);
     await Promise.all(PRECACHE.map(async (path) => {
       const url = scoped(path);
+      // redirect:"follow", NOT "manual": static hosts canonicalize .html URLs
+      // (Cloudflare assets 307s /table.html -> /table), which would otherwise
+      // fail every install. Safety is preserved by the checks below: the final
+      // response must be a same-origin 200 with a sane content-type — an Access
+      // login chain ends on *.cloudflareaccess.com and still fails atomically.
       const res = await fetch(url, {
-        redirect: "manual", // Access redirect -> opaqueredirect (status 0) -> install fails
+        redirect: "follow",
         cache: "reload", // bypass HTTP cache so a stale login page can't sneak in
         credentials: "same-origin",
       });
       if (res.status !== 200) throw new Error(`precache ${url}: status ${res.status}`);
+      if (res.url && new URL(res.url).origin !== self.location.origin) {
+        throw new Error(`precache ${url}: redirected off-origin to ${res.url}`);
+      }
       if (!contentTypeOk(url, res)) {
         throw new Error(`precache ${url}: bad content-type ${res.headers.get("content-type")}`);
       }
+      // Key by the REQUESTED path (url), not the canonical res.url, so cache
+      // lookups by precache path keep working on every host flavor.
       await cache.put(url, res);
     }));
     // ANY miss above rejects waitUntil -> the whole install fails atomically;
@@ -125,13 +137,16 @@ self.addEventListener("fetch", (event) => {
       } catch {
         // EXCEPTION-ONLY fallback: the fetch itself rejected (truly offline).
         // Map the REQUEST pathname (never the response) to a cached shell so the
-        // app still boots offline; offline.html stays the last resort.
-        const path = url.pathname;
+        // app still boots offline; offline.html stays the last resort. Hosts
+        // that canonicalize .html URLs mean users navigate to /table, not
+        // /table.html — accept both spellings (and a trailing slash).
         const root = scoped("./");
+        let path = url.pathname;
+        if (path.length > root.length && path.endsWith("/")) path = path.slice(0, -1);
         let shell;
-        if (path === root || path + "/" === root || path === scoped("index.html")) {
+        if (path === root || path + "/" === root || path === scoped("index.html") || path === scoped("index")) {
           shell = scoped("index.html");
-        } else if (path === scoped("table.html")) {
+        } else if (path === scoped("table.html") || path === scoped("table")) {
           shell = scoped("table.html");
         }
         const fromCache = (p) => caches.match(p, { cacheName: CACHE }).catch(() => undefined);
