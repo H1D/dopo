@@ -15,6 +15,8 @@
   --in-green: #157f3d;
   --out-red: #b3261e;
   --park-gray: #4b5563;
+  --dust: #b3a89a;
+  --dust-shadow: rgba(31, 36, 48, .3);
   --shadow: 0 2px 6px rgba(31, 36, 48, .07), 0 12px 32px rgba(31, 36, 48, .12);
   --shadow-lift: 0 8px 18px rgba(31, 36, 48, .14), 0 28px 60px rgba(31, 36, 48, .22);
   --radius: 22px;
@@ -37,6 +39,8 @@
     --in-green: #4ade80;
     --out-red: #f87171;
     --park-gray: #6b7280;
+    --dust: #6d7686; /* dust catches light — a warm gray would vanish on dark */
+    --dust-shadow: rgba(0, 0, 0, .55);
     --shadow: 0 2px 6px rgba(0, 0, 0, .35), 0 12px 32px rgba(0, 0, 0, .5);
     --shadow-lift: 0 8px 18px rgba(0, 0, 0, .45), 0 28px 60px rgba(0, 0, 0, .6);
   }
@@ -240,7 +244,30 @@ header.top {
   transform: translateY(-18px) scale(1.03) !important;
   box-shadow: var(--shadow-lift);
 }
-.card.settling { transition: transform .45s var(--spring); }
+/* The next card hopping into the front slot after a swipe. It starts from the
+   peek position it already occupies, so there is no teleport — it lifts, then
+   slams down with the same squash as a dealt card. Staged on the FRONT card
+   because that is the one the eye is on: an incoming card animated at the back
+   of the deck is invisible, occluded by the two opaque cards in front of it. */
+/* Easing is per-segment, not one curve over the whole animation: a single
+   bezier front-loaded the fall so the card arrived at ~49% but the impact
+   keyframe sat at 68%, leaving it frozen at full squash for ~100ms and firing
+   the dust after the landing was over. Now the fall accelerates into the
+   impact keyframe at 52% and the dust is scheduled to match (LAND_IMPACT).
+   Squash is 3%, not 5% — this card is full of text, and a wider stretch is
+   legible as distortion rather than weight. */
+.card.landing { animation: card-land .42s linear both; }
+@keyframes card-land {
+  0% { transform: translateY(16px) scale(.94); opacity: .85;
+       animation-timing-function: cubic-bezier(.2, .75, .4, 1); }
+  26% { transform: translateY(-38px) scale(1.03); opacity: 1;
+        animation-timing-function: cubic-bezier(.55, 0, .85, .6); }
+  52% { transform: translateY(0) scaleX(1.03) scaleY(.955);
+        animation-timing-function: cubic-bezier(.2, .7, .4, 1); }
+  72% { transform: translateY(-7px) scaleX(.995) scaleY(1.01);
+        animation-timing-function: ease-in; }
+  100% { transform: translateY(0) scale(1); opacity: 1; }
+}
 
 /* color wash while dragging */
 .wash {
@@ -464,10 +491,13 @@ header.top {
 .card.dealing { animation: deal-drop .52s cubic-bezier(.3, .9, .35, 1.18) both; }
 .card.dealing.deal-1 { animation-delay: .07s; }
 .card.dealing.deal-2 { animation-delay: .14s; }
+/* Squash on contact at 62%: weight reads from the card deforming, not from
+   the particles. The dust is garnish on top of this. */
 @keyframes deal-drop {
   0% { transform: translateY(-120vh) rotate(5deg) scale(1.06); }
-  62% { transform: translateY(0) rotate(0deg) scale(1); }
-  76% { transform: translateY(-12px) scale(1.01); }
+  62% { transform: translateY(0) rotate(0deg) scaleX(1.05) scaleY(.93); }
+  74% { transform: translateY(-11px) scaleX(.985) scaleY(1.02); }
+  86% { transform: translateY(0) scaleX(1.01) scaleY(.995); }
   100% { transform: translateY(0) scale(1); }
 }
 /* peek cards land on their resting transforms */
@@ -475,30 +505,71 @@ header.top {
 .card.dealing.deal-2 { animation-name: deal-drop-2; }
 @keyframes deal-drop-1 {
   0% { transform: translateY(-120vh) rotate(-4deg) scale(1); }
-  62% { transform: translateY(16px) scale(.94); }
+  62% { transform: translateY(16px) scaleX(.96) scaleY(.90); }
   78% { transform: translateY(8px) scale(.94); }
   100% { transform: translateY(16px) scale(.94); }
 }
 @keyframes deal-drop-2 {
   0% { transform: translateY(-120vh) rotate(3deg) scale(.95); }
-  62% { transform: translateY(30px) scale(.885); }
+  62% { transform: translateY(30px) scaleX(.905) scaleY(.85); }
   80% { transform: translateY(24px) scale(.885); }
   100% { transform: translateY(30px) scale(.885); }
 }
-.dust { position: fixed; z-index: 4; pointer-events: none; }
-.dust i {
+/* Impact dust — sprite sheet baked by scripts/gen-dust-sprite.ts (16 frames x
+   2 rows). Rendered white with an alpha channel and used as a MASK, so --dust
+   supplies the colour and one asset serves both themes.
+
+   Everything here sits at z-index 0 inside .stage, i.e. UNDER the cards
+   (z 1-3): the dust billows out from beneath the deck rather than washing
+   across the card face. Only transform/opacity/mask-position animate, so the
+   compositor does the work — see lib/dust.js for the tiering. */
+.dust-cloud {
   position: absolute;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--muted) 55%, var(--bg));
-  opacity: 0;
-  animation: dust-puff .7s ease-out both;
+  z-index: 0;
+  pointer-events: none;
+  width: var(--sz);
+  height: var(--sz);
+  margin: calc(var(--sz) / -2);
+  background: var(--dust);
+  -webkit-mask-image: url("dust.png");
+  mask-image: url("dust.png");
+  -webkit-mask-size: var(--sheet-w) calc(var(--sz) * 2);
+  mask-size: var(--sheet-w) calc(var(--sz) * 2);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  opacity: var(--op, 1);
+  /* two animations, two curves: the sheet steps frame-to-frame while the
+     transform eases — one element, no wrapper needed */
+  animation: dust-sheet var(--dur) steps(16) both,
+             dust-rise var(--dur) ease-out both;
 }
-@keyframes dust-puff {
-  0% { opacity: 0; transform: translate(0, 0) scale(.4); }
-  18% { opacity: .85; }
-  100% { opacity: 0; transform: translate(var(--dx), var(--dy)) scale(var(--ds)); }
+@keyframes dust-sheet {
+  from { -webkit-mask-position: 0 var(--row); mask-position: 0 var(--row); }
+  to { -webkit-mask-position: calc(-1 * var(--sheet-w)) var(--row);
+       mask-position: calc(-1 * var(--sheet-w)) var(--row); }
+}
+@keyframes dust-rise {
+  from { transform: translate(0, 0) scale(var(--s0)); }
+  to { transform: translate(var(--dx, 0), var(--dy)) scale(var(--s1)); }
+}
+
+/* particle sim target; sized to the deck's footprint, not the viewport */
+.dust-canvas { position: absolute; z-index: 0; pointer-events: none; }
+
+/* contact shadow — the ground reacting is half of why the drop reads as heavy */
+.dust-ground {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, var(--dust-shadow), transparent 72%);
+  opacity: 0;
+  animation: dust-ground .5s ease-out both;
+}
+@keyframes dust-ground {
+  0% { opacity: 0; transform: translateX(-50%) scaleX(.55); }
+  18% { opacity: 1; transform: translateX(-50%) scaleX(1.15); }
+  100% { opacity: 0; transform: translateX(-50%) scaleX(1.35); }
 }
 
 /* ---------- toasts ---------- */
