@@ -23,6 +23,7 @@ import { assembleState, classifyPass1, webCheck, merchantKeyOf } from "./data.js
 import {
   esc, splitEmoji, fmtAmountText, isConfident as cardConfident, cardHTML, CONFIDENT_AT,
 } from "./lib/card.js";
+import { createDust } from "./lib/dust.js";
 
 /** @typedef {import("./data.js").DeckTxn} Txn */
 /** @typedef {import("./data.js").UISuggestion} UISuggestion */
@@ -154,6 +155,10 @@ function main() {
   let lastPct = -1;
   let inboxCelebrated = false;
   let dealAnim = false; // next renderStack deals cards in with the drop+dust effect
+  /** Id of the transaction that was on top at the last render. Compared by id
+   *  rather than DOM identity because the top card is rebuilt in place when a
+   *  late suggestion arrives — that must not read as a new card landing. */
+  let lastTopId = "";
   let onboardingActive = false; // missing LM token -> "Connect Lunch Money" card
   /** @type {Set<"lm"|"or">} */
   const deadTokenNoted = new Set(); // dead tokens already routed to Settings this session
@@ -822,12 +827,15 @@ function main() {
           <div class="empty-title">Inbox zero</div>
           <div class="empty-sub">${subHtml}</div>`));
       }
+      lastTopId = ""; // deck emptied: whatever arrives next is a fresh landing
       updateActionButtons();
       return;
     }
 
     const dealing = dealAnim && !reducedMotion;
     dealAnim = false;
+    /** @type {"deal"|"land"|null} which landing to sync the dust to, if any */
+    let landed = null;
     want.forEach((t, i) => {
       let el = kept.get(String(t.id)) ?? null;
       // Refresh card content when a suggestion arrived. Peek cards always; the TOP
@@ -837,49 +845,40 @@ function main() {
         !!el && !el.classList.contains("lifted") && !el.classList.contains("flying");
       if (el && el.dataset.sig !== cardSig(t) && (i > 0 || topIdle)) { el.remove(); el = null; }
       if (!el) { el = buildCard(t); stack.appendChild(el); }
-      const wasTop = el.classList.contains("c0");
       el.classList.remove("c0", "c1", "c2");
       el.classList.add(`c${i}`);
       if (dealing) {
         const dealEl = el;
         dealEl.classList.add("dealing", `deal-${i}`);
         dealEl.addEventListener("animationend", () => dealEl.classList.remove("dealing", `deal-${i}`), { once: true });
+        landed = "deal";
       }
       if (i === 0) {
-        if (!dealing && !wasTop && !reducedMotion) {
-          const settleEl = el;
-          settleEl.classList.add("settling");
-          setTimeout(() => settleEl.classList.remove("settling"), 500);
+        // A different transaction reached the front: hop it into place so every
+        // swipe ends with a landing, not just a set load. Same id means the card
+        // was only rebuilt (a suggestion arrived) — leave it alone.
+        if (!dealing && String(t.id) !== lastTopId && !reducedMotion) {
+          const landEl = el;
+          landEl.classList.add("landing");
+          landEl.addEventListener("animationend", () => landEl.classList.remove("landing"), { once: true });
+          setTimeout(() => landEl.classList.remove("landing"), 600);
+          landed = "land";
         }
         if (!el.dataset.dragBound) { attachDrag(el); el.dataset.dragBound = "1"; }
       }
     });
-    if (dealing) dustBlast();
+    lastTopId = String(want[0]?.id ?? "");
+    if (landed) dust.blast(els.stack, landed);
     updateActionButtons();
   }
 
-  /** Impact dust when the deck lands — cards should feel heavy. */
-  function dustBlast() {
-    const stackR = els.stack.getBoundingClientRect();
-    setTimeout(() => {
-      haptic([18, 40, 10]);
-      const dust = document.createElement("div");
-      dust.className = "dust";
-      dust.style.left = `${stackR.left + stackR.width / 2}px`;
-      dust.style.top = `${stackR.bottom - 10}px`;
-      for (let i = 0; i < 10; i++) {
-        const p = document.createElement("i");
-        const ang = Math.PI + (i / 9) * Math.PI; // fan out along the bottom edge
-        p.style.setProperty("--dx", `${Math.cos(ang) * (30 + (i % 3) * 26)}px`);
-        p.style.setProperty("--dy", `${-8 - (i % 4) * 7}px`);
-        p.style.setProperty("--ds", `${0.5 + (i % 3) * 0.35}`);
-        p.style.animationDelay = `${(i % 5) * 22}ms`;
-        dust.appendChild(p);
-      }
-      document.body.appendChild(dust);
-      setTimeout(() => dust.remove(), 900);
-    }, 300); // sync with the drop keyframe's impact moment
-  }
+  /* ---------- impact dust ----------
+     Lives in lib/dust.js: sprite sheet baked at build time, three quality
+     tiers, self-demoting when a landing blows its frame budget. */
+  const dust = createDust({ reducedMotion, haptic });
+  dust.preload();
+  matchMedia("(prefers-color-scheme: dark)")
+    .addEventListener("change", () => dust.onThemeChange());
 
   function updateActionButtons() {
     const top = set[0] ?? null;
@@ -987,7 +986,9 @@ function main() {
     if (e.target instanceof Element && e.target.closest("button")) return; // cat chip / details live off the drag path
     const txn = set[0];
     if (!txn || String(txn.id) !== el.dataset.id) return;
-    el.classList.remove("settling");
+    // A running animation outranks the inline transform we set while dragging,
+    // so grabbing a card mid-landing must cancel the landing first.
+    el.classList.remove("landing");
     dragCtx = {
       el, txn, id: e.pointerId,
       startX: e.clientX, startY: e.clientY,
@@ -1726,6 +1727,7 @@ function main() {
   // ---------- lifecycle ----------
   function onHidden() {
     lastHiddenAt = Date.now();
+    dust.reset(); // rAF is throttled to a crawl when hidden; don't hold particles
     // 1) clear undo state SYNCHRONOUSLY — its item stays non-flushable
     clearUndoForHidden();
     // 2) keepalive flush of current-snapshot flushable items only; the rest stays

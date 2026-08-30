@@ -143,7 +143,49 @@ if (!precacheMatch) {
   for (const p of present) if (!listed.has(p)) fail(`public/${p} exists but is missing from sw.js PRECACHE`);
 }
 
-// ---- 7: zero runtime dependencies ------------------------------------------
+// ---- 7: dust sprite frame count is consistent ------------------------------
+// The frame count lives in three places (the baker, the sim, and the CSS
+// steps() timing). If they drift, the sheet plays at the wrong rate or shows
+// blank cells — a silent, animation-only breakage no other check would catch.
+{
+  const baker = readFileSync("scripts/gen-dust-sprite.ts", "utf8");
+  const frames = [
+    ["scripts/gen-dust-sprite.ts", baker.match(/const FRAMES = (\d+)/)?.[1]],
+    ["public/lib/dust.js", read("lib/dust.js").match(/const FRAMES = (\d+)/)?.[1]],
+    ["public/app.css", read("app.css").match(/animation: dust-sheet var\(--dur\) steps\((\d+)\)/)?.[1]],
+  ] as const;
+  const missing = frames.filter(([, v]) => !v).map(([f]) => f);
+  if (missing.length) {
+    fail(`dust sprite: frame count not found in ${missing.join(", ")}`);
+  } else if (new Set(frames.map(([, v]) => v)).size !== 1) {
+    fail(`dust sprite: frame count disagrees — ${frames.map(([f, v]) => `${f}=${v}`).join(", ")}`);
+  }
+  const cell = [
+    ["scripts/gen-dust-sprite.ts", baker.match(/const SIZE = (\d+)/)?.[1]],
+    ["public/lib/dust.js", read("lib/dust.js").match(/const CELL = (\d+)/)?.[1]],
+  ] as const;
+  if (cell.every(([, v]) => v) && new Set(cell.map(([, v]) => v)).size !== 1) {
+    fail(`dust sprite: cell size disagrees — ${cell.map(([f, v]) => `${f}=${v}`).join(", ")}`);
+  }
+
+  // dust.js schedules the puff as a fraction of each card animation's duration.
+  // If CSS and JS disagree the dust fires before or after the card lands, which
+  // reads as a random puff rather than an impact.
+  const css = read("app.css");
+  const js = read("lib/dust.js");
+  const durations = [
+    ["deal", css.match(/\.card\.dealing \{ animation: deal-drop ([\d.]+)s/)?.[1], js.match(/DEAL_MS = (\d+)/)?.[1]],
+    ["land", css.match(/\.card\.landing \{ animation: card-land ([\d.]+)s/)?.[1], js.match(/LAND_MS = (\d+)/)?.[1]],
+  ] as const;
+  for (const [name, cssSec, jsMs] of durations) {
+    if (!cssSec || !jsMs) { fail(`dust timing: could not read the ${name} duration from app.css / lib/dust.js`); continue; }
+    if (Math.round(parseFloat(cssSec) * 1000) !== Number(jsMs)) {
+      fail(`dust timing: ${name} duration disagrees — app.css=${cssSec}s, lib/dust.js=${jsMs}ms`);
+    }
+  }
+}
+
+// ---- 8: zero runtime dependencies ------------------------------------------
 
 const pkg = JSON.parse(readFileSync("package.json", "utf8")) as Record<string, unknown>;
 if ("dependencies" in pkg) {
