@@ -34,8 +34,11 @@ dopo.artems.net (assets-only Worker; works equally behind an auth proxy). ES mod
 - `sw.js` (path unchanged — required for update detection): precache derived from
   `self.registration.scope`; `VERSION = "__DOPO_VERSION__"` placeholder stamped at deploy;
   exception-only offline fallback: on navigation fetch REJECTION (never on status/type)
-  serve the cached shell mapped by pathname (scope root/index.html → index.html,
-  table.html → table.html, else offline.html, else Response.error()); `/api` interception
+  serve the cached shell mapped by pathname (scope root/index[.html] → index.html,
+  table[.html] → table.html — hosts canonicalize .html URLs, accept both spellings —
+  else offline.html, else Response.error()); install fetches FOLLOW redirects but
+  accept only a same-origin 200 with a sane content-type (Cloudflare assets 307s
+  .html paths; an Access chain ends off-origin and still fails install atomically); `/api` interception
   rules removed (there is no API); connect-src does not include foreign origins for the SW itself.
 
 ## Two-pass classification
