@@ -109,6 +109,9 @@ custom domain, behind Cloudflare Access:
 bun scripts/stamp-sw.ts && bunx wrangler deploy
 ```
 
+The reference instance auto-deploys: every commit on `master` ships through the CI deploy job
+once all gates pass (`CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` repository secrets).
+
 Access is optional — the app holds no server-side data to protect, so a public static host is just
 as safe. The service worker is written to be Access-safe if you do put it behind one (install-time
 content-type guards, redirect-transparent navigations, exception-only offline fallback).
