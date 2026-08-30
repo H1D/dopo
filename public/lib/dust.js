@@ -26,11 +26,11 @@
 export const DEAL_MS = 520;
 /** Keyframe offset where the card touches down — when the dust fires. */
 export const DEAL_IMPACT = 0.62;
-/** Same, for .card.landing: the shorter hop the next card makes after a swipe.
- *  0.52 is where card-land's fall segment ends — the frame the card actually
- *  touches down, not where it finishes settling. */
-export const LAND_MS = 420;
-export const LAND_IMPACT = 0.52;
+/** Same, for .card.landing. The promoted card falls from off-screen using the
+ *  very same deal-drop keyframes, so the timing is identical — only the weight
+ *  of the dust differs between a whole-deck deal and a single swipe. */
+export const LAND_MS = DEAL_MS;
+export const LAND_IMPACT = DEAL_IMPACT;
 
 /** Impact delay per landing kind, so the dust hits when the card actually does. */
 const IMPACT_MS = {

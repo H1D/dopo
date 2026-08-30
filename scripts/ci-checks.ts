@@ -173,9 +173,14 @@ if (!precacheMatch) {
   // reads as a random puff rather than an impact.
   const css = read("app.css");
   const js = read("lib/dust.js");
+  const dealMs = js.match(/DEAL_MS = (\d+)/)?.[1];
+  // LAND_MS may alias DEAL_MS: the promoted card falls with the same keyframes.
+  const rawLand = js.match(/LAND_MS = (\d+|DEAL_MS)/)?.[1];
+  const landMs = rawLand === "DEAL_MS" ? dealMs : rawLand;
   const durations = [
-    ["deal", css.match(/\.card\.dealing \{ animation: deal-drop ([\d.]+)s/)?.[1], js.match(/DEAL_MS = (\d+)/)?.[1]],
-    ["land", css.match(/\.card\.landing \{ animation: card-land ([\d.]+)s/)?.[1], js.match(/LAND_MS = (\d+)/)?.[1]],
+    // animation name is captured loosely — both rules may point at deal-drop
+    ["deal", css.match(/\.card\.dealing \{ animation: [\w-]+ ([\d.]+)s/)?.[1], dealMs],
+    ["land", css.match(/\.card\.landing \{ animation: [\w-]+ ([\d.]+)s/)?.[1], landMs],
   ] as const;
   for (const [name, cssSec, jsMs] of durations) {
     if (!cssSec || !jsMs) { fail(`dust timing: could not read the ${name} duration from app.css / lib/dust.js`); continue; }

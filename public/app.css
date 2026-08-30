@@ -71,11 +71,21 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 
 /* ---------- header ---------- */
 
+/* Above the cards (z 1-3) and opaque, so a card falling in from off-screen
+   passes BEHIND the chrome instead of sweeping across the title. Cards only
+   ever cross this band on their way down; at rest nothing overlaps, so the
+   added background is invisible. */
 header.top {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px 6px;
+  /* the 4px that used to be .progress's top margin lives here instead: as
+     margin it sat outside both backgrounds, leaving a full-width slit the
+     falling card showed through for ~75ms. Same total spacing. */
+  padding: 10px 14px 10px;
+  position: relative;
+  z-index: 4;
+  background: var(--bg);
 }
 
 .brand {
@@ -151,10 +161,12 @@ header.top {
 
 .progress {
   height: 8px;
-  margin: 4px 14px 0;
+  margin: 0 14px;
   background: var(--line);
   border-radius: 999px;
   overflow: hidden;
+  position: relative;
+  z-index: 4;
 }
 .progress-fill {
   height: 100%;
@@ -175,6 +187,9 @@ header.top {
   text-align: center;
   padding: 5px 14px 0;
   font-variant-numeric: tabular-nums;
+  position: relative;
+  z-index: 4;
+  background: var(--bg);
 }
 
 /* ---------- stage & stack ---------- */
@@ -249,25 +264,15 @@ header.top {
    slams down with the same squash as a dealt card. Staged on the FRONT card
    because that is the one the eye is on: an incoming card animated at the back
    of the deck is invisible, occluded by the two opaque cards in front of it. */
-/* Easing is per-segment, not one curve over the whole animation: a single
-   bezier front-loaded the fall so the card arrived at ~49% but the impact
-   keyframe sat at 68%, leaving it frozen at full squash for ~100ms and firing
-   the dust after the landing was over. Now the fall accelerates into the
-   impact keyframe at 52% and the dust is scheduled to match (LAND_IMPACT).
-   Squash is 3%, not 5% — this card is full of text, and a wider stretch is
-   legible as distortion rather than weight. */
-.card.landing { animation: card-land .42s linear both; }
-@keyframes card-land {
-  0% { transform: translateY(16px) scale(.94); opacity: .85;
-       animation-timing-function: cubic-bezier(.2, .75, .4, 1); }
-  26% { transform: translateY(-38px) scale(1.03); opacity: 1;
-        animation-timing-function: cubic-bezier(.55, 0, .85, .6); }
-  52% { transform: translateY(0) scaleX(1.03) scaleY(.955);
-        animation-timing-function: cubic-bezier(.2, .7, .4, 1); }
-  72% { transform: translateY(-7px) scaleX(.995) scaleY(1.01);
-        animation-timing-function: ease-in; }
-  100% { transform: translateY(0) scale(1); opacity: 1; }
-}
+/* The next card falls in from off-screen, exactly as a dealt card does —
+   same keyframes, so there is one landing in the app rather than two curves
+   to keep in sync. It replaces an earlier short "hop" from the peek position.
+   The card that arrives at the BACK of the deck is still not animated: it is
+   off-screen for most of any fall and then fully occluded by the two opaque
+   cards in front of it, so animating it there is measurably invisible. Every
+   card still falls from the top before you ever read it — it does so on the
+   swipe that promotes it to the front. */
+.card.landing { animation: deal-drop .52s cubic-bezier(.3, .9, .35, 1.18) both; }
 
 /* color wash while dragging */
 .wash {

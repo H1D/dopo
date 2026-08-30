@@ -96,9 +96,11 @@ test("a missing or empty deck reference never shakes", () => {
   expect(heft("999999", NaN)).toBe(0);
 });
 
-test("a swipe landing puffs sooner than a dealt one", () => {
-  // The post-swipe hop is shorter than the full deal, so its dust must fire
-  // earlier — reusing the deal timing would puff after the card had settled.
-  expect(LAND_MS * LAND_IMPACT).toBeLessThan(DEAL_MS * DEAL_IMPACT);
+test("a swipe landing shares the dealt card's timing", () => {
+  // The promoted card falls from off-screen with the very same deal-drop
+  // keyframes, so the two must stay in lockstep: if one is retuned and the
+  // other is not, the dust fires before or after the card actually lands.
+  expect(LAND_MS).toBe(DEAL_MS);
+  expect(LAND_MS * LAND_IMPACT).toBe(DEAL_MS * DEAL_IMPACT);
   expect(LAND_MS * LAND_IMPACT).toBeLessThan(LAND_MS);
 });
