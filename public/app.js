@@ -9,9 +9,13 @@
  */
 
 // Pure template exports for tests (XSS property test imports cardHTML from app.js).
-export { cardHTML, esc, splitEmoji, fmtAmount, fmtAmountText, isConfident, CONFIDENT_AT } from "./lib/card.js";
+export {
+  cardHTML, esc, splitEmoji, fmtAmount, fmtAmountText, fmtTxnDate, isConfident, CONFIDENT_AT,
+} from "./lib/card.js";
 
-import { LMError, applyCategories, getMe, getState, getTransaction, KEEPALIVE_MAX_ITEMS } from "./lib/lm.js";
+import {
+  LMError, applyCategories, getMe, getState, getTransaction, KEEPALIVE_MAX_ITEMS, CUTOFF_PRESETS,
+} from "./lib/lm.js";
 import { ORError, checkKey } from "./lib/classify.js";
 import {
   getTokens, setTokens, clearTokens,
@@ -19,11 +23,14 @@ import {
   snapshotPrune,
   laterLoad, laterAdd, laterRemove,
   rulesLoad, ruleAdd, rulesSave,
+  cutoffLoad, cutoffSave, fetchWindow,
 } from "./lib/store.js";
 import { replayQueue, isPoisonStatus, STUCK_AFTER_ATTEMPTS } from "./lib/sync.js";
-import { assembleState, assembleFromSnapshot, classifyPass1, webCheck, merchantKeyOf } from "./data.js";
 import {
-  esc, splitEmoji, fmtAmountText, isConfident as cardConfident, cardHTML, CONFIDENT_AT,
+  assembleState, assembleFromSnapshot, attachSuggestions, classifyPass1, webCheck, merchantKeyOf,
+} from "./data.js";
+import {
+  esc, splitEmoji, fmtAmountText, fmtTxnDate, isConfident as cardConfident, cardHTML, CONFIDENT_AT,
 } from "./lib/card.js";
 import { createDust, heft, referenceAmount } from "./lib/dust.js";
 
@@ -92,6 +99,8 @@ function main() {
   /** @type {Txn[]} */
   let later = []; // full txn bodies (IndexedDB), pointers in localStorage; loaded in init
   let rules = rulesLoad();
+  let cutoff = cutoffLoad(); // how far back the LM fetch window reaches
+  let cutoffDirty = false; // changed in Settings; the deck is redealt on sheet close
   /** @type {number[]} */
   let recent = /** @type {number[]} */ (lsLoad(LS.recent, []).filter((id) => typeof id === "number")); // recently picked category ids
   /** @type {string[]} */
@@ -131,7 +140,7 @@ function main() {
   /** Decision-path queue write: SYNCHRONOUS fresh-read-merge (queueLoad → fn →
    *  queueSave), NO lock — async lock callbacks may never run during teardown
    *  (pagehide), and single-item appends/marks are conflict-free. The fresh read
-   *  is the load-bearing part: it merges concurrent table-tab/other-tab writes
+   *  is the load-bearing part: it merges concurrent other-tab writes
    *  instead of clobbering them with our stale in-memory view. `fn` mutates the
    *  FRESH array; item mutations must look up by (id, ts). Slow multi-step paths
    *  (interactive flush persistence, replay) use store.queueMutate instead.
@@ -291,6 +300,8 @@ function main() {
     lmTokenInput: $input("#lmTokenInput"), lmTokenHint: $el("#lmTokenHint"), lmTokenError: $el("#lmTokenError"),
     orTokenInput: $input("#orTokenInput"), orTokenHint: $el("#orTokenHint"), orTokenError: $el("#orTokenError"),
     budgetLine: $el("#budgetLine"), webCheckLine: $el("#webCheckLine"), forgetBtn: $btn("#forgetBtn"),
+    cutoffRow: $el("#cutoffRow"), cutoffLine: $el("#cutoffLine"),
+    rulesNote: $el("#rulesNote"), rulesList: $el("#rulesList"),
     badgeToggle: $input("#badgeToggle"), settingsError: $el("#settingsError"), menuSettings: $btn("#menuSettings"),
     onboardCard: $el("#onboardCard"), onboardOpen: $btn("#onboardOpen"),
     webBar: $el("#webBar"), webBarBtn: $btn("#webBarBtn"),
@@ -433,6 +444,16 @@ function main() {
       renderStack(); updateMeters();
       maybeWebCheck();
     }
+  }
+
+  /** Rebuild every suggestion from the CURRENT rules + caches. Rule-sourced ones are
+   *  cleared first: attachSuggestions only ever writes a suggestion, so a deleted
+   *  rule's verdict would otherwise linger on cards it no longer matches. */
+  async function reattachSuggestions() {
+    for (const t of allTxns) if (t.suggestion?.source === "rule") t.suggestion = null;
+    await attachSuggestions(allTxns, rules); // never throws: cache misses degrade to null
+    reconcile();
+    ensureClassified(); // cards left bare go back to the model
   }
 
   /** @param {Map<number, UISuggestion>} sugs */
@@ -655,7 +676,7 @@ function main() {
    *  @param {string} lmToken @param {QueueItem[]} batch
    *  @returns {Promise<{sendable: QueueItem[], skipped: number[]}>} */
   async function membershipRecheck(lmToken, batch) {
-    const win = await getState(lmToken);
+    const win = await getState(lmToken, fetchWindow());
     const open = new Set(win.transactions.map((t) => t.id));
     /** @type {QueueItem[]} */
     const sendable = [];
@@ -1578,7 +1599,7 @@ function main() {
     const itemHtml = (t) => `<div class="later-item">
         <div class="later-info">
           <div class="later-merchant">${esc(t.merchant || t.payee || "?")}</div>
-          <div class="later-sub">${esc(fmtAmountText(t))} · ${esc(t.date || "")}</div>
+          <div class="later-sub">${esc(fmtAmountText(t))} · ${esc(fmtTxnDate(t.date))}</div>
         </div>
         <button type="button" class="unpark-btn" data-unpark="${Number(t.id)}">Unpark</button>
       </div>`;
@@ -1669,6 +1690,87 @@ function main() {
     els.webCheckLine.hidden = false;
   }
 
+  // ---------- settings: deck cutoff ----------
+  function renderCutoffRow() {
+    const btnHtml = (/** @type {{id: string, label: string}} */ p) =>
+      `<button type="button" class="cutoff-chip${p.id === cutoff ? " on" : ""}"
+        data-cutoff="${esc(p.id)}" aria-pressed="${p.id === cutoff ? "true" : "false"}">${esc(p.label)}</button>`;
+    const chipsHtml = CUTOFF_PRESETS.map(btnHtml).join("");
+    els.cutoffRow.innerHTML = chipsHtml;
+    const { startDate } = fetchWindow();
+    els.cutoffLine.textContent = `Showing transactions from ${fmtTxnDate(startDate)} onwards.`;
+  }
+
+  /** @param {string} id */
+  function pickCutoff(id) {
+    if (id === cutoff) return;
+    cutoff = /** @type {import("./lib/lm.js").CutoffId} */ (id);
+    try { cutoffSave(id); } catch { storageFailed(); }
+    cutoffDirty = true; // a full refetch mid-sheet would fight the open sheet — do it on close
+    renderCutoffRow();
+    haptic(8);
+  }
+
+  /** A changed cutoff means a different window entirely: refetch and redeal from
+   *  scratch rather than reconcile(), which would preserve a top card that may now
+   *  be out of range. */
+  async function applyCutoffChange() {
+    cutoffDirty = false;
+    if (loadState === "none") { retryLoad(); return; }
+    try {
+      await fetchState();
+    } catch (e) {
+      if (!isNoTokenErr(e)) noteConnOutcome("lm", e);
+      routeLMError(e);
+      return; // the old deck stays; the banner/chip already say why
+    }
+    backlog = eligible(allTxns).sort(byConfDesc);
+    dealSet();
+    inboxCelebrated = false;
+    truncationNoted = false;
+    dealAnim = true;
+    renderStack();
+    updateMeters();
+    ensureClassified();
+  }
+
+  // ---------- settings: local rules ----------
+  /** Rules are created from the undo toast ("Always: X → Y"); this is where they
+   *  are reviewed and removed. */
+  function renderRulesList() {
+    if (!rules.length) {
+      els.rulesNote.textContent = 'No rules yet — after sorting a card, tap “Always: … →” on the undo toast to make one.';
+      els.rulesList.innerHTML = "";
+      return;
+    }
+    els.rulesNote.textContent = "A rule sorts every matching merchant instantly, before the model is asked.";
+    const rowHtml = (/** @type {Rule} */ r) => {
+      const catName = r.category_name || catById.get(r.category_id)?.name || `category ${r.category_id}`;
+      return `<div class="rule-row">
+        <div class="rule-info">
+          <div class="rule-pattern">${esc(r.pattern)}</div>
+          <div class="rule-cat">→ ${esc(catName)}</div>
+        </div>
+        <button type="button" class="rule-del" data-rule-del="${Number(r.id)}"
+          aria-label="Delete rule ${esc(r.pattern)}">Delete</button>
+      </div>`;
+    };
+    els.rulesList.innerHTML = rules.map(rowHtml).join("");
+  }
+
+  /** @param {number} id */
+  function deleteRule(id) {
+    const next = rules.filter((r) => r.id !== id);
+    if (next.length === rules.length) return;
+    rules = next;
+    try { rulesSave(rules); } catch { storageFailed(); }
+    renderRulesList();
+    // The deck carries rule-sourced suggestions for the pattern we just dropped;
+    // rebuild them from the remaining rules + caches instead of leaving ghosts.
+    void reattachSuggestions();
+    note("Rule deleted");
+  }
+
   let saveAnywayArmed = false; // second tap saves unverified after a network-class validation failure
   function disarmSaveAnyway() {
     saveAnywayArmed = false;
@@ -1689,6 +1791,8 @@ function main() {
     els.budgetLine.hidden = true;
     els.forgetBtn.hidden = !tokens.lm && !tokens.or;
     els.badgeToggle.checked = badgeEnabled;
+    renderCutoffRow();
+    renderRulesList();
     if (deadField === "lm") setFieldError("lm", "This Lunch Money token stopped working — paste a fresh one.");
     if (deadField === "or") setFieldError("or", "This OpenRouter key stopped working — paste a fresh one.");
     openSheet(els.settingsSheet);
@@ -1702,7 +1806,13 @@ function main() {
       }).catch(() => { /* sheet stays usable for pasting tokens */ });
     }
   }
-  function closeSettingsSheet() { closeSheet(els.settingsSheet); }
+  /** @returns {boolean} true when a cutoff change already kicked off a refetch+redeal */
+  function closeSettingsSheet() {
+    closeSheet(els.settingsSheet);
+    if (!cutoffDirty) return false;
+    void applyCutoffChange();
+    return true;
+  }
 
   /** Live per-field validation; paints hint/error itself. "netfail" = the token
    *  wasn't REJECTED, we just couldn't reach the validator (offline / upstream
@@ -1768,10 +1878,12 @@ function main() {
       els.lmTokenInput.value = "";
       els.orTokenInput.value = "";
       note("Saved ✓");
-      closeSettingsSheet();
+      const reloading = closeSettingsSheet();
       if (onboardingActive) hideOnboarding();
-      // let the close animation land, then (re)load with the new tokens
+      // let the close animation land, then (re)load with the new tokens — unless a
+      // cutoff change is already refetching, in which case this would just double up
       setTimeout(() => {
+        if (reloading) { updateWebBar(); return; }
         if (loadState !== "none") { refresh(); updateWebBar(); } else retryLoad(); // snapshot takes the refresh() arm
       }, reducedMotion ? 200 : 420);
     } catch (e) {
@@ -2204,8 +2316,16 @@ function main() {
     });
 
     els.menuSettings.addEventListener("click", () => { els.menuPop.hidden = true; openSettingsSheet(null); });
-    els.settingsClose.addEventListener("click", closeSettingsSheet);
+    els.settingsClose.addEventListener("click", () => closeSettingsSheet());
     els.settingsSave.addEventListener("click", saveSettings);
+    els.cutoffRow.addEventListener("click", (e) => {
+      const b = e.target instanceof Element ? e.target.closest("[data-cutoff]") : null;
+      if (b instanceof HTMLElement && b.dataset.cutoff) pickCutoff(b.dataset.cutoff);
+    });
+    els.rulesList.addEventListener("click", (e) => {
+      const b = e.target instanceof Element ? e.target.closest("[data-rule-del]") : null;
+      if (b instanceof HTMLElement && b.dataset.ruleDel) deleteRule(Number(b.dataset.ruleDel));
+    });
     els.forgetBtn.addEventListener("click", onForgetTokens);
     els.lmTokenInput.addEventListener("change", () => {
       disarmSaveAnyway(); // edited token: the unverified-save consent no longer applies

@@ -25,7 +25,7 @@ dopo.artems.net (assets-only Worker; works equally behind an auth proxy). ES mod
 - `lib/rules.js`, `lib/clean.js` — ports of rule matching + payee cleaning (pure, fixture-tested).
 - `lib/store.js` — storage: tokens + apply queue + Later pile pointers in localStorage;
   suggestion cache + Later bodies + state snapshot in IndexedDB (~2000-entry LRU, per-entry writes).
-- `lib/sync.js` — shared queue replay (boot replay + table apply): one membership recheck,
+- `lib/sync.js` — shared queue replay (boot replay + back-online resync): one membership recheck,
   chunked PUTs, poison-item isolation, make_rule absorption. Throws typed errors, never touches UI.
 - `data.js` — orchestration: state assembly, rules-first classification, two-pass scheduling, cache.
 - `app.js` (NEW NAME, was swipe.js) + `app.css` (was swipe.css) + `boot.js` (SW registration; NO inline
@@ -34,9 +34,9 @@ dopo.artems.net (assets-only Worker; works equally behind an auth proxy). ES mod
 - `sw.js` (path unchanged — required for update detection): precache derived from
   `self.registration.scope`; `VERSION = "__DOPO_VERSION__"` placeholder stamped at deploy;
   exception-only offline fallback: on navigation fetch REJECTION (never on status/type)
-  serve the cached shell mapped by pathname (scope root/index[.html] → index.html,
-  table[.html] → table.html — hosts canonicalize .html URLs, accept both spellings —
-  else offline.html, else Response.error()); install fetches FOLLOW redirects but
+  serve the cached shell mapped by pathname (scope root/index[.html] → index.html —
+  hosts canonicalize .html URLs, accept both spellings — else offline.html, else
+  Response.error()); install fetches FOLLOW redirects but
   accept only a same-origin 200 with a sane content-type (Cloudflare assets 307s
   .html paths; an Access chain ends off-origin and still fails install atomically); `/api` interception
   rules removed (there is no API); connect-src does not include foreign origins for the SW itself.
@@ -76,7 +76,7 @@ source of truth for transaction data; the device is the source of truth for pend
 - **Queue write classes.** Decision-path writes (swipe decide, undo, finalize, pagehide
   sent-marking) are SYNCHRONOUS fresh-read-merge `queueLoad → modify → queueSave` — never behind
   an async lock (a blocked lock grant must not be able to lose a swipe; pagehide callbacks may
-  never run). Slow multi-step read-modify-write paths (replay, table bulk push, flush persistence
+  never run). Slow multi-step read-modify-write paths (replay, flush persistence
   steps) go through `queueMutate(fn)` under `navigator.locks("dopo.queue")`; `fn` is synchronous;
   the lock is never held across network I/O; saves collapse duplicate ids (max ts wins). Item
   identity is `(id, ts)` — never object references.
@@ -103,11 +103,10 @@ source of truth for transaction data; the device is the source of truth for pend
   degrades single calls without poisoning the cached open); every open registers
   `onversionchange → close`; Later-pointer compaction is forbidden whenever bodies may have been
   written to the memory fallback — "IDB confirmed gone" ≠ "couldn't reach IDB".
-- **Accepted trade-offs:** any replay (boot, or another tab's table apply) marks everything
+- **Accepted trade-offs:** any replay (boot, or another tab's) marks everything
   flushable, so decisions from a killed session sync without an undo window and a replay in a
   sibling tab can finalize this tab's live undo toast early; a transaction re-uncategorized remotely will accept a
-  stale queued decision; the table view has no snapshot mode (shell + queued-count banner only);
-  iOS standalone and Safari-tab containers are isolated — queue and chip counts don't span them;
+  stale queued decision; iOS standalone and Safari-tab containers are isolated — queue and chip counts don't span them;
   a sheet left open >10 min ages out keepalive eligibility (sync defers to replay); the snapshot
   comparator misses in-place edits on identical id-sets (next content change repairs); offline
   boot works from the second visit after a deploy (the new SW must activate first — do not "fix"
@@ -116,7 +115,21 @@ source of truth for transaction data; the device is the source of truth for pend
 ## Settings / onboarding
 
 - Settings: two password fields (LM required, OR optional), live validation per field, budget name
-  display, **"Forget tokens on this device"** button (clears tokens only), web-check session counter.
+  display, **"Forget tokens on this device"** button (clears tokens only), web-check session counter,
+  **deck cutoff** chips, **local rules** list.
+- **Deck cutoff** (`dopo.cutoff.v1`, presets `1w`/`1m`/`3m`/`ytd`, default `ytd` = the pre-cutoff
+  behaviour): `store.fetchWindow()` is the single source of the LM date window, used by the deck
+  fetch AND by every membership recheck so the two never page different ranges. Unknown ids fall
+  back to the default rather than fetching an empty or unbounded range. Changing it is applied on
+  sheet close (like the accounts filter) as a full refetch + redeal, not a `reconcile()` — the top
+  card may no longer be in range.
+- **Local rules**: pattern → category, delete only (creation stays on the undo toast). Deleting one
+  clears rule-sourced suggestions and re-attaches from the remaining rules + caches, so a deleted
+  rule leaves no ghost verdict on a card.
+- **Dates** render through `card.fmtTxnDate` — `Intl.DateTimeFormat` with an `undefined` locale, so
+  day/month order follows the reader's own region. Bare `YYYY-MM-DD` is parsed as a LOCAL calendar
+  day (`new Date("…")` is UTC midnight = the previous day west of Greenwich); the year is added only
+  when it isn't the current one, and a time only when the source actually carries one.
 - Onboarding card for missing LM token: link to the LM developers page and OR keys page with
   one-line instructions; recommends a dedicated OR key with a spend limit.
 
@@ -126,7 +139,7 @@ source of truth for transaction data; the device is the source of truth for pend
   `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; manifest-src 'self';
   connect-src 'self' https://api.lunchmoney.dev https://openrouter.ai; base-uri 'self';
   form-action 'none'; object-src 'none'` (frame-ancestors impossible via meta — never claimed).
-- ZERO inline <script>, <style>, or style= attributes in any HTML (externalize table.html/offline.html
+- ZERO inline <script>, <style>, or style= attributes in any HTML (externalize offline.html
   styles; boot.js replaces the inline SW registration).
 - Card markup built through a PURE exported template function (`cardHTML(txn, ...)`) so bun tests can
   assert `<img onerror>` payloads in payee/notes/lookup come out escaped — a property test, not a grep.
@@ -141,8 +154,10 @@ source of truth for transaction data; the device is the source of truth for pend
 
 - `src/`, `migrations/`, `SPEC-MULTITENANT.md`, `worker-configuration.d.ts`, `tests/access.test.ts`
   removed from the working tree (history retention accepted & documented).
-- `table.html`/`table.js`: PORTED to lib/lm.js + lib/store.js (rules management + bulk view stay useful),
-  styles externalized to `table.css`.
+- `table.html`/`table.js`/`table.css`: REMOVED. The bulk-select view never earned its keep next to
+  swipe mode, and it was the app's only second page (a second precached shell, a second SW navigation
+  mapping, and its own duplicated `esc`/`toast`/`fmtAmount`). Rules management moved into the Settings
+  sheet; rules are still created from the undo toast's "Always: … →" chip.
 - package.json: NO `dependencies` (hono gone); devDependencies only (wrangler for the Cloudflare deploy,
   typescript for checkJs, @types/bun). bun.lock regenerated accordingly.
 - wrangler.jsonc: assets-only (no D1, no crons, no vars, no main).

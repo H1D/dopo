@@ -20,7 +20,6 @@
   <div class="menu">
     <button id="menuBtn" aria-label="Menu" aria-haspopup="true">⋯</button>
     <div class="menu-pop" id="menuPop" hidden>
-      <a href="./table.html">Table &amp; rules</a>
       <button id="menuAccounts">Accounts…</button>
       <button id="menuSettings">Settings</button>
       <button id="menuRefresh">Refresh deck</button>
@@ -117,6 +116,14 @@
     </div>
     <div class="settings-info" id="budgetLine" hidden></div>
     <div class="settings-info" id="webCheckLine" hidden></div>
+    <div class="sheet-section">Sort from</div>
+    <div class="settings-info">How far back the deck reaches. Older transactions stay
+      uncategorized in Lunch Money until you widen this.</div>
+    <div class="cutoff-row" id="cutoffRow" role="group" aria-label="How far back to sort"></div>
+    <div class="settings-info" id="cutoffLine"></div>
+    <div class="sheet-section">Local rules</div>
+    <div class="settings-info" id="rulesNote"></div>
+    <div id="rulesList"></div>
     <div class="sheet-section">App badge</div>
     <label class="toggle-row">
       <input type="checkbox" id="badgeToggle">

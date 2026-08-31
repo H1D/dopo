@@ -44,6 +44,67 @@ export function fmtAmount(t) {
  */
 export const fmtAmountText = (t) => { const a = fmtAmount(t); return `${a.sign}${a.abs} ${a.cur}`; };
 
+/** Lunch Money dates are calendar days (`YYYY-MM-DD`); some feeds carry a full timestamp. */
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** Intl.DateTimeFormat construction is the expensive part — one per option set. */
+/** @type {Map<string, Intl.DateTimeFormat>} */
+const dtfCache = new Map();
+/** @param {Intl.DateTimeFormatOptions} opts @returns {Intl.DateTimeFormat} */
+function dtf(opts) {
+  const key = JSON.stringify(opts);
+  let f = dtfCache.get(key);
+  // `undefined` locale = the browser's own regional preference, which is the point:
+  // the same day reads "31 August" in en-GB, "August 31" in en-US, "31 augustus" in nl.
+  if (!f) { f = new Intl.DateTimeFormat(undefined, opts); dtfCache.set(key, f); }
+  return f;
+}
+
+/**
+ * Parse an LM transaction date. A bare `YYYY-MM-DD` is a calendar day and is built
+ * in LOCAL time — `new Date("2026-08-31")` is UTC midnight, which renders as the
+ * 30th for anyone west of Greenwich.
+ * @param {unknown} date
+ * @returns {{at: Date, hasTime: boolean}|null} null when unparseable
+ */
+export function parseTxnDate(date) {
+  const s = String(date ?? "").trim();
+  if (!s) return null;
+  const m = DATE_ONLY.exec(s);
+  if (!m) {
+    const at = new Date(s);
+    return Number.isNaN(at.getTime()) ? null : { at, hasTime: true };
+  }
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const at = new Date(y, mo - 1, d);
+  // The Date constructor rolls "2026-13-45" over into 2027 rather than failing;
+  // corrupt input must read as unparseable, not as a confidently wrong day.
+  if (at.getFullYear() !== y || at.getMonth() !== mo - 1 || at.getDate() !== d) return null;
+  return { at, hasTime: false };
+}
+
+/**
+ * Day + month name in the reader's own locale ("31 August" / "August 31"), plus the
+ * time when the source carries one and the year when it isn't the current one.
+ * Unparseable input falls back to the raw string rather than "Invalid Date".
+ * @param {unknown} date
+ * @param {Date} [now]  today, for the "same year → drop the year" test
+ * @returns {string}
+ */
+export function fmtTxnDate(date, now = new Date()) {
+  const p = parseTxnDate(date);
+  if (!p) return String(date ?? "");
+  /** @type {Intl.DateTimeFormatOptions} */
+  const opts = { day: "numeric", month: "long" };
+  if (p.at.getFullYear() !== now.getFullYear()) opts.year = "numeric";
+  if (p.hasTime) { opts.hour = "numeric"; opts.minute = "2-digit"; }
+  try {
+    return dtf(opts).format(p.at);
+  } catch {
+    return String(date); // no Intl data for the requested fields
+  }
+}
+
 /**
  * Loose suggestion shape as rendered on a card.
  * @typedef {object} CardSuggestion
@@ -133,7 +194,7 @@ export function cardHTML(txn, { category = null, account = null, confidentAt = C
       </div>
       <div class="merchant">${esc(t.merchant || t.payee || "Unknown")}</div>
       <div class="amount ${esc(a.dir)}">${esc(a.sign)}${esc(a.abs)}<span class="cur">${esc(a.cur)}</span></div>
-      <div class="txn-date">${esc(t.date || "")}${acctHtml}</div>
+      <div class="txn-date">${esc(fmtTxnDate(t.date))}${acctHtml}</div>
       <div class="reason">${esc(s?.reasoning || "not classified yet")}</div>
       ${evidenceHtml}
       <button class="details-toggle" type="button">ⓘ details</button>

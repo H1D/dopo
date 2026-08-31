@@ -51,8 +51,13 @@ You pay OpenRouter directly; dopo adds no margin because dopo has no operator.
 | Pass 1 — batch classification | every unsuggested transaction, batches of 8 | ~$0.06 per 500 transactions |
 | Pass 2 — web check | once per **unique** merchant the model was unsure about (auto-capped at 15 per session, more behind an explicit button) | $0.0075 per merchant, cached — you pay at most once per merchant while the cache persists |
 
+Sorting less costs less: **Settings → Sort from** sets how far back dopo fetches (last week, last
+month, last 3 months, or this year — the default), so pass 1 only classifies what's in range.
+
 No OpenRouter key? The app still fully works with local rules + manual picking; you just get no AI
-suggestions.
+suggestions. A rule is made from the undo toast right after you sort a card ("Always: *merchant* →
+*category*") and matches instantly and offline forever after; review or delete them under
+**Settings → Local rules**.
 
 ## What you give up vs. a server variant
 

@@ -157,15 +157,69 @@ export function leafCategories(cats) {
 }
 
 /**
+ * How far back the deck reaches. Ids are persisted (lib/store.js `dopo.cutoff.v1`),
+ * so renaming one silently resets that device to the default — add, don't rename.
+ * @typedef {"1w"|"1m"|"3m"|"ytd"} CutoffId
+ * @type {readonly {id: CutoffId, label: string}[]}
+ */
+export const CUTOFF_PRESETS = /** @type {const} */ ([
+  { id: "1w", label: "Last week" },
+  { id: "1m", label: "Last month" },
+  { id: "3m", label: "Last 3 months" },
+  { id: "ytd", label: "This year" },
+]);
+
+/** Jan 1 of the current year — what dopo has always fetched. */
+export const DEFAULT_CUTOFF = /** @type {CutoffId} */ ("ytd");
+
+/**
+ * Subtract whole months from a UTC date, clamping the day to the target month's
+ * length so "31 May minus 3 months" is 28/29 Feb, not 3 March.
+ * @param {Date} from
+ * @param {number} months
+ * @returns {Date}
+ */
+function minusMonths(from, months) {
+  const y = from.getUTCFullYear();
+  const m = from.getUTCMonth() - months;
+  const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(y, m, Math.min(from.getUTCDate(), lastDay)));
+}
+
+/**
+ * The fetch window for a cutoff preset, ending today (UTC). Unknown ids — a
+ * downgraded build, or storage written by a newer one — fall back to the default
+ * rather than fetching an empty or unbounded range.
+ * @param {string} [preset]
+ * @param {Date} [now]
+ * @returns {{start: string, end: string}}
+ */
+export function cutoffRange(preset = DEFAULT_CUTOFF, now = new Date()) {
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const end = today.toISOString().slice(0, 10);
+  /** @param {Date} d */
+  const day = (d) => d.toISOString().slice(0, 10);
+  switch (preset) {
+    case "1w": {
+      const start = new Date(today);
+      start.setUTCDate(start.getUTCDate() - 7);
+      return { start: day(start), end };
+    }
+    case "1m":
+      return { start: day(minusMonths(today, 1)), end };
+    case "3m":
+      return { start: day(minusMonths(today, 3)), end };
+    default:
+      return { start: `${today.getUTCFullYear()}-01-01`, end };
+  }
+}
+
+/**
  * Jan 1 of the current year through today (UTC) — same window the Worker used.
  * @returns {{start: string, end: string}}
  */
 export function defaultRange() {
-  const now = new Date();
-  return {
-    start: `${now.getUTCFullYear()}-01-01`,
-    end: now.toISOString().slice(0, 10),
-  };
+  return cutoffRange(DEFAULT_CUTOFF);
 }
 
 /**

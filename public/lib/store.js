@@ -8,6 +8,7 @@
  *                          old queued items must replay through the new client)
  *   - Later pile POINTERS  dopo.later.v1   (ids; legacy full-txn entries still accepted)
  *   - rules                dopo.rules.v1
+ *   - deck cutoff preset   dopo.cutoff.v1
  *
  * IndexedDB (bulk, async): suggestion cache + Later txn bodies (~2000-entry LRU,
  * per-entry writes) + the offline state snapshot. Falls back to in-memory Maps
@@ -20,12 +21,14 @@
  */
 
 import { isRule } from "./rules.js";
+import { CUTOFF_PRESETS, DEFAULT_CUTOFF, cutoffRange } from "./lm.js";
 
 export const LS_KEYS = {
   tokens: "dopo.tokens.v1",
   queue: "dopo.queue.v1",
   later: "dopo.later.v1",
   rules: "dopo.rules.v1",
+  cutoff: "dopo.cutoff.v1",
 };
 
 // ---------------------------------------------------------------------------
@@ -187,8 +190,8 @@ function queueCollapse(items) {
 }
 
 /**
- * Slow-path queue writes (replay, table bulk push, interactive-flush persistence
- * steps) — multi-step read-modify-write under `navigator.locks` "dopo.queue".
+ * Slow-path queue writes (replay, interactive-flush persistence steps) —
+ * multi-step read-modify-write under `navigator.locks` "dopo.queue".
  * Decision-path writes (decide/undo/pagehide) stay synchronous inline merges and
  * must NOT come through here (async lock callbacks may never run in teardown).
  *
@@ -288,6 +291,39 @@ export function ruleAdd(rule) {
   };
   rulesSave([...existing, full]);
   return full;
+}
+
+// ---------------------------------------------------------------------------
+// deck cutoff — how far back the Lunch Money fetch window reaches
+// ---------------------------------------------------------------------------
+
+/** @returns {import("./lm.js").CutoffId} */
+export function cutoffLoad() {
+  const v = lsGet(LS_KEYS.cutoff);
+  return CUTOFF_PRESETS.some((p) => p.id === v)
+    ? /** @type {import("./lm.js").CutoffId} */ (v)
+    : DEFAULT_CUTOFF;
+}
+
+/**
+ * @param {string} id  ignored (default kept) when it isn't a known preset
+ * @throws on storage failure
+ */
+export function cutoffSave(id) {
+  lsSet(LS_KEYS.cutoff, CUTOFF_PRESETS.some((p) => p.id === id) ? id : DEFAULT_CUTOFF);
+}
+
+/**
+ * The stored window, in `getState`/`applyCategories` opts shape. Every LM fetch —
+ * the deck AND every membership recheck — goes through this so they page the SAME
+ * range. A recheck narrower than the decisions it validates is still correct (misses
+ * fall back to per-id GETs, see lib/lm.js applyCategories) but costs a round trip
+ * each, so they must not drift apart.
+ * @returns {{startDate: string, endDate: string}}
+ */
+export function fetchWindow() {
+  const { start, end } = cutoffRange(cutoffLoad());
+  return { startDate: start, endDate: end };
 }
 
 // ---------------------------------------------------------------------------

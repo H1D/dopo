@@ -3,7 +3,7 @@ import { cleanMerchant } from "../public/lib/clean.js";
 
 /**
  * Real messy payee shapes from the family's ABN AMRO feed (as documented in
- * src/enrich.ts and surfaced raw in table.js's "raw" column).
+ * src/enrich.ts and surfaced raw in the card's details panel).
  */
 describe("cleanMerchant", () => {
   test("Mollie PSP intermediary with dossier + IBAN tail", () => {

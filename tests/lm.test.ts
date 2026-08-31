@@ -5,8 +5,12 @@ import accountsFx from "./fixtures/lm/accounts.json";
 import pagesFx from "./fixtures/lm/transactions-2pages.json";
 import endlessPageFx from "./fixtures/lm/transactions-endless-page.json";
 import {
+  CUTOFF_PRESETS,
+  DEFAULT_CUTOFF,
   LMError,
   applyCategories,
+  cutoffRange,
+  defaultRange,
   getMe,
   getState,
 } from "../public/lib/lm.js";
@@ -178,5 +182,53 @@ describe("applyCategories — hidden-flush mode (recheck none, keepalive)", () =
     const updates = Array.from({ length: 21 }, (_, i) => ({ id: i + 1, category_id: 101 }));
     await expect(applyCategories("tok", updates, { recheck: "none", keepalive: true })).rejects.toThrow(/20/);
     expect(mock.calls.length).toBe(0); // nothing partially sent
+  });
+});
+
+describe("cutoffRange — the deck's fetch window", () => {
+  // A Tuesday in the middle of a month, deliberately not near any boundary.
+  const now = new Date(Date.UTC(2026, 7, 18)); // 18 Aug 2026
+
+  test("every preset ends today and starts on or before it", () => {
+    for (const p of CUTOFF_PRESETS) {
+      const r = cutoffRange(p.id, now);
+      expect(r.end).toBe("2026-08-18");
+      expect(r.start <= r.end).toBe(true);
+      expect(r).toEqual({ start: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), end: r.end });
+    }
+  });
+
+  test("1w / 1m / 3m / ytd land on the expected day", () => {
+    expect(cutoffRange("1w", now).start).toBe("2026-08-11");
+    expect(cutoffRange("1m", now).start).toBe("2026-07-18");
+    expect(cutoffRange("3m", now).start).toBe("2026-05-18");
+    expect(cutoffRange("ytd", now).start).toBe("2026-01-01");
+  });
+
+  test("month subtraction clamps instead of rolling into the next month", () => {
+    const may31 = new Date(Date.UTC(2026, 4, 31));
+    // naive setUTCMonth(-3) gives 31 Feb -> 3 March; the clamp gives 28 Feb
+    expect(cutoffRange("3m", may31).start).toBe("2026-02-28");
+    const mar31Leap = new Date(Date.UTC(2028, 2, 31));
+    expect(cutoffRange("1m", mar31Leap).start).toBe("2028-02-29");
+  });
+
+  test("3m crosses the year boundary rather than clamping to Jan 1", () => {
+    const jan10 = new Date(Date.UTC(2026, 0, 10));
+    expect(cutoffRange("3m", jan10)).toEqual({ start: "2025-10-10", end: "2026-01-10" });
+  });
+
+  test("an unknown or missing preset falls back to the default window", () => {
+    const ytd = cutoffRange("ytd", now);
+    expect(cutoffRange("nonsense", now)).toEqual(ytd);
+    expect(cutoffRange(undefined, now)).toEqual(ytd);
+    expect(DEFAULT_CUTOFF).toBe("ytd");
+  });
+
+  test("defaultRange stays the ytd window (the pre-cutoff behaviour)", () => {
+    const d = defaultRange();
+    const y = new Date().getUTCFullYear();
+    expect(d.start).toBe(`${y}-01-01`);
+    expect(d.end).toBe(new Date().toISOString().slice(0, 10));
   });
 });

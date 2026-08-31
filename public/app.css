@@ -842,6 +842,50 @@ body.quaking > .actions {
 .settings-info { font-size: 13px; color: var(--muted); padding: 6px 8px 0; }
 .settings-info b { color: var(--ink); }
 
+.cutoff-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px;
+}
+.cutoff-chip {
+  flex: 1 1 auto;
+  min-height: 44px;
+  padding: 10px 14px;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  white-space: nowrap;
+}
+.cutoff-chip.on {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.rule-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.rule-row:last-child { border-bottom: none; }
+.rule-info { flex: 1; min-width: 0; }
+.rule-pattern { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rule-cat { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rule-del {
+  flex-shrink: 0;
+  min-height: 44px;
+  padding: 8px 14px;
+  font-weight: 700;
+  color: var(--out-red);
+  border-radius: 10px;
+}
+
 .toggle-row {
   display: flex;
   align-items: flex-start;

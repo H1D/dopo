@@ -22,6 +22,9 @@ import {
   cacheIsMemoryOnly,
   clearTokens,
   configureCache,
+  cutoffLoad,
+  cutoffSave,
+  fetchWindow,
   getTokens,
   isSuggestion,
   keepaliveEligible,
@@ -564,5 +567,43 @@ describe("IndexedDB-backed paths (fake-indexeddb)", () => {
     expect(bodies).toEqual([]);
     expect(loadLater().ids).toEqual([31, 32]); // pointers SURVIVE — pile not wiped
     expect(cacheIsMemoryOnly()).toBe(false);
+  });
+});
+
+describe("deck cutoff — dopo.cutoff.v1", () => {
+  test("defaults to the ytd window when nothing is stored", () => {
+    expect(cutoffLoad()).toBe("ytd");
+    expect(fetchWindow().startDate).toBe(`${new Date().getUTCFullYear()}-01-01`);
+  });
+
+  test("round-trips a known preset", () => {
+    cutoffSave("1m");
+    expect(cutoffLoad()).toBe("1m");
+    expect(backing.get(LS_KEYS.cutoff)).toBe('"1m"');
+    expect(fetchWindow().startDate).not.toBe(`${new Date().getUTCFullYear()}-01-01`);
+  });
+
+  test("an unknown id is neither stored nor loaded", () => {
+    cutoffSave("since-the-dawn-of-time");
+    expect(cutoffLoad()).toBe("ytd");
+  });
+
+  test("corrupt storage degrades to the default instead of throwing", () => {
+    backing.set(LS_KEYS.cutoff, "{not json");
+    expect(cutoffLoad()).toBe("ytd");
+    backing.set(LS_KEYS.cutoff, JSON.stringify({ id: "1w" }));
+    expect(cutoffLoad()).toBe("ytd");
+  });
+
+  test("fetchWindow speaks the getState opts shape", () => {
+    cutoffSave("1w");
+    const w = fetchWindow();
+    expect(Object.keys(w).sort()).toEqual(["endDate", "startDate"]);
+    expect(w.startDate < w.endDate).toBe(true);
+  });
+
+  test("a failed write throws so callers can switch to eager flush", () => {
+    failWrites = true;
+    expect(() => cutoffSave("3m")).toThrow();
   });
 });
