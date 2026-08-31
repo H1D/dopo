@@ -1051,6 +1051,12 @@ body.quaking > .actions {
   font-size: 14px;
 }
 
+/* armed = one more tap actually clears them */
+.forget-btn.armed {
+  border-color: var(--out-red);
+  background: color-mix(in srgb, var(--out-red) 12%, transparent);
+}
+
 /* onboarding steps (token links) */
 .onboard-steps {
   text-align: left;

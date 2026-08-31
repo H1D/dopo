@@ -1783,6 +1783,7 @@ function main() {
     els.lmTokenInput.value = "";
     els.orTokenInput.value = "";
     disarmSaveAnyway();
+    disarmForget(); // never reopen with the destructive button still armed
     clearSettingsErrors();
     els.lmTokenHint.textContent = "Configured ✓ — paste to replace";
     els.lmTokenHint.hidden = !tokens.lm || deadField === "lm";
@@ -1808,6 +1809,7 @@ function main() {
   }
   /** @returns {boolean} true when a cutoff change already kicked off a refetch+redeal */
   function closeSettingsSheet() {
+    disarmForget();
     closeSheet(els.settingsSheet);
     if (!cutoffDirty) return false;
     void applyCutoffChange();
@@ -1850,7 +1852,15 @@ function main() {
     const lm = els.lmTokenInput.value.trim();
     const or = els.orTokenInput.value.trim();
     clearSettingsErrors();
-    if (!lm && !or) { setSettingsError("Paste at least one token to save."); return; }
+    if (!lm && !or) {
+      // Both inputs open blank by design, so "nothing pasted" means "tokens unchanged",
+      // not "no tokens". The sheet also holds the badge toggle, the deck cutoff and the
+      // rules list, so Save is the natural "I'm done" gesture — erroring here nagged for
+      // tokens the app already had. closeSettingsSheet() still applies a dirty cutoff.
+      if (!tokens.lm) { setSettingsError("Paste your Lunch Money token to get started."); return; }
+      closeSettingsSheet();
+      return;
+    }
     els.settingsSave.disabled = true;
     els.settingsSave.textContent = "Checking…";
     try {
@@ -1894,8 +1904,22 @@ function main() {
     }
   }
 
+  let forgetArmed = false; // second tap actually clears — the button sits right under Save
+  function disarmForget() {
+    forgetArmed = false;
+    els.forgetBtn.textContent = "Forget tokens on this device";
+    els.forgetBtn.classList.remove("armed");
+  }
+
   /** "Forget tokens on this device" — clears tokens only; queue/rules/caches stay. */
   function onForgetTokens() {
+    if (!forgetArmed) {
+      forgetArmed = true;
+      els.forgetBtn.textContent = "Tap again to forget — you'll have to paste them back";
+      els.forgetBtn.classList.add("armed");
+      return;
+    }
+    disarmForget();
     clearTokens();
     tokens = getTokens();
     disarmSaveAnyway();
