@@ -168,7 +168,7 @@ describe("replayQueue — contract", () => {
   });
 
   test("duplicate ids collapse before the PUT — max ts wins", async () => {
-    queueSave([qi(7, 101, { ts: 1 }), qi(7, 202, { ts: 9 })]); // app tab + table tab, same txn
+    queueSave([qi(7, 101, { ts: 1 }), qi(7, 202, { ts: 9 })]); // two tabs, same txn
     routeReplay({ window: [7] });
     const res = await replayQueue("tok");
     expect(res.applied).toEqual([7]);

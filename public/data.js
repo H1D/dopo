@@ -9,7 +9,7 @@ import { getState } from "./lib/lm.js";
 import { classifyTransactions, webCheckMerchant } from "./lib/classify.js";
 import { matchRule, ruleSuggestion } from "./lib/rules.js";
 import { cleanMerchant } from "./lib/clean.js";
-import { snapshotLoad, snapshotSave, sugGetMany, sugPut, isSuggestion } from "./lib/store.js";
+import { snapshotLoad, snapshotSave, sugGetMany, sugPut, isSuggestion, fetchWindow } from "./lib/store.js";
 
 /**
  * Suggestion as the UI consumes it (superset of the old server shape the deck
@@ -64,7 +64,7 @@ function fromCache(c, source) {
  * @returns {Promise<{categories: Category[], accounts: Account[], transactions: DeckTxn[], truncated: boolean, total: number|null}>}
  */
 export async function assembleState(token, rules) {
-  const raw = await getState(token);
+  const raw = await getState(token, fetchWindow());
   // Offline fallback: persist the RAW state (before decoration) after every
   // successful fetch. Best-effort — snapshotSave never throws.
   // fire-and-forget: never-throwing best-effort write, and a multi-MB IDB clone

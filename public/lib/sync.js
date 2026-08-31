@@ -1,8 +1,8 @@
 // @ts-check
 /**
  * Queue replay against Lunch Money — the recheck-based path every decision not
- * covered by the same-session keepalive flush goes through (boot replay, table
- * pushes). Storage via lib/store.js, network via lib/lm.js; NEVER touches
+ * covered by the same-session keepalive flush goes through (boot replay, the
+ * back-online resync). Storage via lib/store.js, network via lib/lm.js; NEVER touches
  * DOM/UI. THROWS typed errors — LMError passes through untouched (the caller
  * keeps its routeLMError routing), fetch rejections (TypeError) likewise.
  *
@@ -12,7 +12,7 @@
  */
 
 import { LMError, applyCategories, getState, getTransaction } from "./lm.js";
-import { queueMutate, ruleAdd, snapshotPrune } from "./store.js";
+import { fetchWindow, queueMutate, ruleAdd, snapshotPrune } from "./store.js";
 
 /** @typedef {import("./store.js").QueueItem} QueueItem */
 /**
@@ -132,7 +132,7 @@ export async function replayQueue(token, opts = {}) {
  * @returns {Promise<{safe: QueueItem[], skipped: QueueItem[]}>}
  */
 async function recheckMembership(token, items) {
-  const state = await getState(token);
+  const state = await getState(token, fetchWindow());
   const open = new Set(state.transactions.map((t) => t.id));
   /** @type {QueueItem[]} */
   const safe = [];

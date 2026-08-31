@@ -48,9 +48,6 @@ const PRECACHE = [
   "lib/sync.js",
   "offline.html",
   "offline.css",
-  "table.html",
-  "table.js",
-  "table.css",
   "manifest.webmanifest",
   "icon.svg",
   "dust.png",
@@ -81,7 +78,7 @@ self.addEventListener("install", (event) => {
     await Promise.all(PRECACHE.map(async (path) => {
       const url = scoped(path);
       // redirect:"follow", NOT "manual": static hosts canonicalize .html URLs
-      // (Cloudflare assets 307s /table.html -> /table), which would otherwise
+      // (Cloudflare assets 307s /index.html -> /), which would otherwise
       // fail every install. Safety is preserved by the checks below: the final
       // response must be a same-origin 200 with a sane content-type — an Access
       // login chain ends on *.cloudflareaccess.com and still fails atomically.
@@ -140,16 +137,14 @@ self.addEventListener("fetch", (event) => {
         // EXCEPTION-ONLY fallback: the fetch itself rejected (truly offline).
         // Map the REQUEST pathname (never the response) to a cached shell so the
         // app still boots offline; offline.html stays the last resort. Hosts
-        // that canonicalize .html URLs mean users navigate to /table, not
-        // /table.html — accept both spellings (and a trailing slash).
+        // that canonicalize .html URLs mean users navigate to /, not /index.html
+        // — accept both spellings (and a trailing slash).
         const root = scoped("./");
         let path = url.pathname;
         if (path.length > root.length && path.endsWith("/")) path = path.slice(0, -1);
         let shell;
         if (path === root || path + "/" === root || path === scoped("index.html") || path === scoped("index")) {
           shell = scoped("index.html");
-        } else if (path === scoped("table.html") || path === scoped("table")) {
-          shell = scoped("table.html");
         }
         const fromCache = (p) => caches.match(p, { cacheName: CACHE }).catch(() => undefined);
         const cached = (shell && (await fromCache(shell))) || (await fromCache(OFFLINE_PATH));
