@@ -132,19 +132,40 @@ header.top {
   border-radius: 10px;
   color: var(--muted);
 }
+/* Popover API = top layer, which is above every stacking context. The old
+   absolute + z-index:40 popup was trapped inside header.top's z-index:4 context,
+   so .progress and .meter (also z-index:4, but later in DOM) painted over it. */
 .menu-pop {
-  position: absolute;
-  right: 0;
-  top: 110%;
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  /* Fallback while anchor positioning is unsupported (Firefox): sit under the
+     header band, right-aligned to the button (14px from the viewport edge). */
+  top: calc(env(safe-area-inset-top) + 46px);
+  right: 14px;
   background: var(--card);
+  color: var(--ink); /* UA [popover] forces CanvasText */
   border: 1px solid var(--line);
   border-radius: 12px;
   box-shadow: var(--shadow);
   padding: 6px;
-  z-index: 40;
   min-width: 170px;
+  overflow: visible;
+}
+/* The UA hides [popover]:not(:popover-open) with display:none; an unconditional
+   author display:flex would beat it and pin the menu open forever. */
+.menu-pop:popover-open {
   display: flex;
   flex-direction: column;
+}
+
+@supports (anchor-name: --a) {
+  #menuBtn { anchor-name: --menu-btn; }
+  .menu-pop {
+    position-anchor: --menu-btn;
+    top: calc(anchor(bottom) + 6px);
+    right: anchor(right);
+  }
 }
 .menu-pop a, .menu-pop button {
   display: block;

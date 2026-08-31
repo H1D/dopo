@@ -1777,9 +1777,15 @@ function main() {
     els.settingsSave.textContent = "Save";
   }
 
+  /** hidePopover() throws InvalidStateError when the popover is already closed,
+   *  and every caller here closes the menu blind. */
+  function closeMenu() {
+    if (els.menuPop.matches(":popover-open")) els.menuPop.hidePopover();
+  }
+
   /** @param {"lm"|"or"|null} deadField  names the token the upstream just rejected */
   function openSettingsSheet(deadField) {
-    els.menuPop.hidden = true;
+    closeMenu();
     els.lmTokenInput.value = "";
     els.orTokenInput.value = "";
     disarmSaveAnyway();
@@ -2339,7 +2345,7 @@ function main() {
       else if (els.acctSheet.hidden === false) closeAcctSheet();
     });
 
-    els.menuSettings.addEventListener("click", () => { els.menuPop.hidden = true; openSettingsSheet(null); });
+    els.menuSettings.addEventListener("click", () => { closeMenu(); openSettingsSheet(null); });
     els.settingsClose.addEventListener("click", () => closeSettingsSheet());
     els.settingsSave.addEventListener("click", saveSettings);
     els.cutoffRow.addEventListener("click", (e) => {
@@ -2385,7 +2391,7 @@ function main() {
       }
     });
 
-    els.menuAccounts.addEventListener("click", () => { els.menuPop.hidden = true; openAcctSheet(); });
+    els.menuAccounts.addEventListener("click", () => { closeMenu(); openAcctSheet(); });
     els.acctClose.addEventListener("click", closeAcctSheet);
     els.acctBody.addEventListener("change", (e) => {
       const cb = e.target instanceof HTMLInputElement ? e.target : null;
@@ -2406,15 +2412,9 @@ function main() {
       if (e.target === els.celebrate || e.target === els.celebrateBtn) hideCelebrate();
     });
 
-    els.menuBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      els.menuPop.hidden = !els.menuPop.hidden;
-    });
-    document.addEventListener("click", (e) => {
-      const t = e.target instanceof Element ? e.target : null;
-      if (!els.menuPop.hidden && !t?.closest(".menu")) els.menuPop.hidden = true;
-    });
-    els.menuRefresh.addEventListener("click", () => { els.menuPop.hidden = true; refresh(); });
+    // Toggle, light dismiss and Esc all come free from popovertarget + popover="auto";
+    // the old manual toggle and outside-click listener would fight them.
+    els.menuRefresh.addEventListener("click", () => { closeMenu(); refresh(); });
 
     document.addEventListener("keydown", (e) => {
       if (sheetOpenNow()) {
