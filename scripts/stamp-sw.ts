@@ -2,11 +2,16 @@
 /**
  * Deploy stamping: copy public/ -> dist/, replacing the __DOPO_VERSION__ placeholder
  * with a content hash over the public/ files (computed BEFORE replacement, so the
- * stamp is deterministic for a given source tree).
+ * stamp is deterministic for a given source tree), and the __DOPO_FREE_KEY__
+ * placeholder (lib/freekey.js) with the DOPO_FREE_KEY environment variable — the
+ * shared free-tier OpenRouter key, which never enters git. An unset/empty variable
+ * stamps an empty key (= no shared tier). The key value is folded into the version
+ * hash, so rotating it re-busts the service-worker cache like any content change.
  *
  * Fails hard when:
  *   - the placeholder is missing from the sw.js INPUT (cache-busting would silently die)
- *   - the placeholder is still present anywhere in the OUTPUT
+ *   - either placeholder is still present anywhere in the OUTPUT
+ *   - DOPO_FREE_KEY is set but does not look like an OpenRouter key
  *
  * Usage: bun scripts/stamp-sw.ts [srcDir] [outDir]   (defaults: public dist)
  * Both deploys use this: the Pages workflow uploads dist/, family deploy is
@@ -18,6 +23,8 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statS
 import { join, relative, resolve } from "node:path";
 
 const PLACEHOLDER = "__DOPO_VERSION__";
+const KEY_PLACEHOLDER = "__DOPO_FREE_KEY__";
+const freeKey = (process.env.DOPO_FREE_KEY ?? "").trim();
 const TEXT_EXT = /\.(js|mjs|css|html|json|webmanifest|svg|txt|xml|md)$/i;
 
 const srcDir = resolve(process.argv[2] ?? "public");
@@ -31,6 +38,7 @@ function fail(msg: string): never {
 if (!existsSync(srcDir) || !statSync(srcDir).isDirectory()) fail(`source dir not found: ${srcDir}`);
 if (resolve(outDir) === resolve(srcDir)) fail("output dir must differ from source dir");
 if ((outDir + "/").startsWith(srcDir + "/")) fail("output dir must not live inside the source dir");
+if (freeKey && !/^sk-or-v1-[0-9a-f]{64}$/.test(freeKey)) fail("DOPO_FREE_KEY is set but is not an OpenRouter key (sk-or-v1-<64 hex>)");
 
 /** All files under dir, as sorted paths relative to dir. */
 function listFiles(dir: string): string[] {
@@ -57,7 +65,8 @@ if (!swSource.includes(PLACEHOLDER)) {
   fail(`${swRel} does not contain the ${PLACEHOLDER} placeholder — SW cache-busting would break`);
 }
 
-// 2. Content hash over ALL source files (paths + bytes), placeholder included.
+// 2. Content hash over ALL source files (paths + bytes), placeholder included,
+//    plus the free key: a rotated key must reach clients like any other change.
 const hash = createHash("sha256");
 for (const rel of files) {
   hash.update(rel);
@@ -65,6 +74,7 @@ for (const rel of files) {
   hash.update(readFileSync(join(srcDir, rel)));
   hash.update("\0");
 }
+hash.update(freeKey);
 const version = hash.digest("hex").slice(0, 12);
 
 // 3. Copy + stamp.
@@ -76,17 +86,18 @@ for (const rel of files) {
   if (!TEXT_EXT.test(rel)) continue;
   const p = join(outDir, rel);
   const text = readFileSync(p, "utf8");
-  if (!text.includes(PLACEHOLDER)) continue;
-  writeFileSync(p, text.split(PLACEHOLDER).join(version));
+  if (!text.includes(PLACEHOLDER) && !text.includes(KEY_PLACEHOLDER)) continue;
+  writeFileSync(p, text.split(PLACEHOLDER).join(version).split(KEY_PLACEHOLDER).join(freeKey));
   stamped++;
 }
 
 // 4. Guard: no placeholder may survive into the output.
 for (const rel of listFiles(outDir)) {
   if (!TEXT_EXT.test(rel)) continue;
-  if (readFileSync(join(outDir, rel), "utf8").includes(PLACEHOLDER)) {
-    fail(`placeholder ${PLACEHOLDER} still present in output file ${rel}`);
+  const text = readFileSync(join(outDir, rel), "utf8");
+  for (const ph of [PLACEHOLDER, KEY_PLACEHOLDER]) {
+    if (text.includes(ph)) fail(`placeholder ${ph} still present in output file ${rel}`);
   }
 }
 
-console.log(`stamp-sw: ${files.length} files -> ${outDir}, version ${version} (${stamped} file(s) stamped)`);
+console.log(`stamp-sw: ${files.length} files -> ${outDir}, version ${version} (${stamped} file(s) stamped, free key ${freeKey ? "set" : "empty"})`);

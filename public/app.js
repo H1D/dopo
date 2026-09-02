@@ -17,6 +17,7 @@ import {
   LMError, applyCategories, getMe, getState, getTransaction, KEEPALIVE_MAX_ITEMS, CUTOFF_PRESETS,
 } from "./lib/lm.js";
 import { ORError, checkKey } from "./lib/classify.js";
+import { FREE_KEY, FREE_MODELS, FREE_CONCURRENCY } from "./lib/freekey.js";
 import {
   getTokens, setTokens, clearTokens,
   queueLoad, queueSave, queueMutate, keepaliveEligible, LS_KEYS,
@@ -229,6 +230,16 @@ function main() {
   let onboardingActive = false; // missing LM token -> "Connect Lunch Money" card
   /** @type {Set<"lm"|"or">} */
   const deadTokenNoted = new Set(); // dead tokens already routed to Settings this session
+  // ---- shared free tier (lib/freekey.js): used only while the user has no key of their own
+  /** @type {{daily: boolean, at: number}|null} */
+  let freeQuotaHit = null; // last quota error (429/402) on the free key this session — drives the upgrade banner
+  let freeCooldownUntil = 0; // no automatic free-key pass before this timestamp
+  let freeCooldownMs = 0; // current backoff step (90s doubling, capped) — reset by any success
+  /** @type {ReturnType<typeof setTimeout>|undefined} */
+  let freeRetryTimer; // re-arms ensureClassified when the cooldown ends
+  let freeTierDead = false; // the shared key itself was rejected (401): fall back to LM-only mode silently
+  let freeModelIdx = 0; // which FREE_MODELS entry is serving; sticky once one works, advances on 429/404
+  let orCreditNoted = false; // the user's own key answered 402 (out of credit) — noted once per session
   let sugToastShown = false; // "N suggestions ready" fires at most once per visit
   let badgeEnabled = false;
   try { badgeEnabled = localStorage.getItem(LS.badge) === "1"; } catch { /* default off */ }
@@ -314,6 +325,7 @@ function main() {
     onboardCard: $el("#onboardCard"), onboardOpen: $btn("#onboardOpen"),
     webBar: $el("#webBar"), webBarBtn: $btn("#webBarBtn"),
     connChip: $el("#connChip"), staleBanner: $el("#staleBanner"), stuckBanner: $btn("#stuckBanner"),
+    upgradeBanner: $btn("#upgradeBanner"),
     updateToast: $el("#updateToast"), updateBtn: $btn("#updateBtn"),
     confetti: $canvas("#confetti"),
   };
@@ -429,6 +441,32 @@ function main() {
   }
 
   // ---------- data layer: pass 1 (rules already attached during assembly) ----------
+  /** The OpenRouter credentials pass 1 runs with: the user's own key, else the
+   *  shared free key (lib/freekey.js), else null = LM-only mode. Pass 2 (web
+   *  checks) reads `tokens.or` directly — it costs money, so it never runs free. */
+  function orCreds() {
+    if (tokens.or) return { key: tokens.or, free: false };
+    if (FREE_KEY && !freeTierDead) return { key: FREE_KEY, free: true };
+    return null;
+  }
+  const onFreeTier = () => !tokens.or && !!FREE_KEY && !freeTierDead;
+
+  /** Quota error (429 / 402) on the shared free key. The cap is per OpenRouter
+   *  account, i.e. shared by everyone on this key, so the honest reaction is:
+   *  keep whatever came back, back off (90s doubling, 15 min cap — a per-day
+   *  bucket only clears at midnight UTC, and 15-minute probes are cheap), and
+   *  show the one banner that actually fixes it: bring your own key.
+   *  @param {ORError} e */
+  function onFreeQuota(e) {
+    freeQuotaHit = { daily: e.dailyQuota, at: Date.now() };
+    const cap = 15 * 60_000;
+    freeCooldownMs = e.dailyQuota ? cap : Math.min(cap, freeCooldownMs ? freeCooldownMs * 2 : 90_000);
+    freeCooldownUntil = Date.now() + freeCooldownMs;
+    clearTimeout(freeRetryTimer);
+    freeRetryTimer = setTimeout(() => ensureClassified(), freeCooldownMs + 500);
+    updateUpgradeBanner();
+  }
+
   async function ensureClassified() {
     // AUTOMATIC classification is live-mode + online only (snapshot decks already
     // carry cached suggestions; hammering a dead network helps nobody). Explicit
@@ -436,15 +474,37 @@ function main() {
     if (classifyRunning || loadState !== "live" || connOffline()) return;
     const unsuggested = [...set, ...backlog].filter((t) => !t.suggestion);
     if (!unsuggested.length) { maybeWebCheck(); return; }
-    if (!tokens.or) { updateWebBar(); return; } // LM-only mode: bar offers the Settings path
+    const creds = orCreds();
+    if (!creds) { updateWebBar(); return; } // LM-only mode: bar offers the Settings path
+    if (creds.free && Date.now() < freeCooldownUntil) { updateWebBar(); return; } // backing off after a free-tier quota hit
     classifyRunning = true;
     renderStack();
+    let nextFreeModel = false; // this free model refused; try the next one right away
     try {
-      await classifyPass1(tokens.or, categories, unsuggested, absorbPass1Slice);
+      await classifyPass1(creds.key, categories, unsuggested, absorbPass1Slice,
+        creds.free ? { model: FREE_MODELS[freeModelIdx] ?? FREE_MODELS[0], concurrency: FREE_CONCURRENCY } : {});
       noteConnOutcome("or", null);
+      if (creds.free) freeCooldownMs = 0; // a full pass got through: the next 429 starts the backoff over
     } catch (e) {
       noteConnOutcome("or", e);
-      if (!routeORError(e) && !connOffline()) note("Classifier hiccup — will retry later");
+      // Free models each sit on one upstream pool: a 429 is as often "that
+      // provider is saturated" as "our account quota"; a 404 is "not on the
+      // guardrail allowlist / no endpoint". Either way the next model in the
+      // list may well answer — the banner is for when none of them do.
+      if (creds.free && e instanceof ORError && (e.quotaExhausted || e.status === 404)) {
+        if (freeModelIdx < FREE_MODELS.length - 1) {
+          freeModelIdx++;
+          nextFreeModel = true;
+        } else {
+          freeModelIdx = 0; // start from the preferred model again after the cooldown
+          onFreeQuota(e); // absorbed batches are already on the cards; the banner says why the rest wait
+        }
+      } else if (creds.free && e instanceof ORError && e.tokenInvalid) {
+        freeTierDead = true; // the shared key was revoked/rotated: LM-only mode, no Settings nag
+        updateWebBar();
+      } else if (!routeORError(e) && !connOffline()) {
+        note("Classifier hiccup — will retry later");
+      }
     } finally {
       classifyRunning = false;
       // reached the end while the user emptied the deck -> celebrate now
@@ -452,6 +512,7 @@ function main() {
       renderStack(); updateMeters();
       maybeWebCheck();
     }
+    if (nextFreeModel) ensureClassified(); // bounded by FREE_MODELS.length — each step advances the index
   }
 
   /** Rebuild every suggestion from the CURRENT rules + caches. Rule-sourced ones are
@@ -554,9 +615,15 @@ function main() {
     const bar = els.webBar;
     if (loadState !== "live") { bar.hidden = true; return; } // snapshot mode: no web spend UI
     if (!tokens.or) {
-      const wantsAI = !!tokens.lm && [...set, ...backlog].some((t) => !t.suggestion || webCandidateKey(t));
+      // Free tier: pass 1 happens, pass 2 doesn't — hint only when an unsure card
+      // would actually get a web check, and not on top of the upgrade banner.
+      const free = onFreeTier();
+      const wantsAI = !!tokens.lm && !(free && freeQuotaHit)
+        && [...set, ...backlog].some((t) => (free ? false : !t.suggestion) || webCandidateKey(t));
       if (wantsAI) {
-        els.webBarBtn.textContent = "Add an OpenRouter key in Settings to enable AI suggestions";
+        els.webBarBtn.textContent = free
+          ? "Your own OpenRouter key adds web checks for unsure merchants"
+          : "Add an OpenRouter key in Settings to enable AI suggestions";
         bar.dataset.mode = "hint";
         bar.hidden = false;
       } else bar.hidden = true;
@@ -1752,7 +1819,9 @@ function main() {
     if (els.settingsSheet.hidden) return;
     els.webCheckLine.textContent = tokens.or
       ? `Web checks this session: ${webChecksUsed} unique merchant${webChecksUsed === 1 ? "" : "s"} (~$${(webChecksUsed * WEB_COST).toFixed(2)})`
-      : "Web checks (pass 2) need an OpenRouter key.";
+      : onFreeTier()
+        ? "Web checks (pass 2) need your own OpenRouter key — the shared free key only does pass 1."
+        : "Web checks (pass 2) need an OpenRouter key.";
     els.webCheckLine.hidden = false;
   }
 
@@ -1849,6 +1918,15 @@ function main() {
     if (els.menuPop.matches(":popover-open")) els.menuPop.hidePopover();
   }
 
+  /** The OR field's resting hint: the user's key, the shared free tier, or nothing.
+   *  @param {boolean} [rejected]  the upstream just refused the user's key — say nothing */
+  function paintOrHint(rejected = false) {
+    if (rejected) { els.orTokenHint.hidden = true; return; }
+    if (tokens.or) els.orTokenHint.textContent = "Configured ✓ — paste to replace";
+    else if (onFreeTier()) els.orTokenHint.textContent = "Using the shared free key — a smaller model, a daily quota shared by everyone, no web checks";
+    els.orTokenHint.hidden = !tokens.or && !onFreeTier();
+  }
+
   /** @param {"lm"|"or"|null} deadField  names the token the upstream just rejected */
   function openSettingsSheet(deadField) {
     closeMenu();
@@ -1859,8 +1937,7 @@ function main() {
     clearSettingsErrors();
     els.lmTokenHint.textContent = "Configured ✓ — paste to replace";
     els.lmTokenHint.hidden = !tokens.lm || deadField === "lm";
-    els.orTokenHint.textContent = "Configured ✓ — paste to replace";
-    els.orTokenHint.hidden = !tokens.or || deadField === "or";
+    paintOrHint(deadField === "or");
     els.budgetLine.hidden = true;
     els.forgetBtn.hidden = !tokens.lm && !tokens.or;
     els.badgeToggle.checked = badgeEnabled;
@@ -1958,7 +2035,7 @@ function main() {
       tokens = getTokens();
       saveAnywayArmed = false;
       if (lm) deadTokenNoted.delete("lm");
-      if (or) deadTokenNoted.delete("or");
+      if (or) { deadTokenNoted.delete("or"); orCreditNoted = false; freeQuotaHit = null; updateUpgradeBanner(); } // own key: the free quota no longer applies
       els.lmTokenInput.value = "";
       els.orTokenInput.value = "";
       note("Saved ✓");
@@ -1998,13 +2075,14 @@ function main() {
     tokens = getTokens();
     disarmSaveAnyway();
     els.lmTokenHint.hidden = true;
-    els.orTokenHint.hidden = true;
+    paintOrHint(); // back on the shared free tier, if there is one
     els.budgetLine.hidden = true;
     els.forgetBtn.hidden = true;
     clearSettingsErrors();
     deadTokenNoted.clear();
     updateWebCheckLine();
     updateWebBar();
+    updateUpgradeBanner();
     note("Tokens forgotten on this device");
     showOnboarding();
   }
@@ -2242,6 +2320,18 @@ function main() {
     }
     updateStaleBanner();
     updateStuckUI();
+    updateUpgradeBanner();
+  }
+
+  /** Free-tier quota surface. Stays up for the session (a per-minute cap clears
+   *  by itself, but it will hit again on the next pass — the shared key is the
+   *  bottleneck, not the moment) until the user pastes their own key. */
+  function updateUpgradeBanner() {
+    if (!freeQuotaHit || tokens.or) { els.upgradeBanner.hidden = true; return; }
+    els.upgradeBanner.textContent = freeQuotaHit.daily
+      ? "Free AI quota used up for today — tap to add your own OpenRouter key"
+      : "Free AI is rate-limited (shared by everyone) — tap to add your own key";
+    els.upgradeBanner.hidden = false;
   }
 
   function updateStaleBanner() {
@@ -2319,6 +2409,15 @@ function main() {
         deadTokenNoted.add("or");
         if (sheetOpenNow()) note("OpenRouter key stopped working — see Settings");
         else openSettingsSheet("or");
+      }
+      return true;
+    }
+    if (e instanceof ORError && e.status === 402) {
+      // the user's own key is out of credit (or its spend limit is hit): a
+      // "hiccup" retry note would be a lie — nothing changes until they top up
+      if (!orCreditNoted) {
+        orCreditNoted = true;
+        note("OpenRouter says your key is out of credit — top up or raise its limit", 5000);
       }
       return true;
     }
@@ -2445,6 +2544,7 @@ function main() {
       maybeWebCheck(true); // explicit user action: always try the network
     });
     els.stuckBanner.addEventListener("click", onStuckTap);
+    els.upgradeBanner.addEventListener("click", () => openSettingsSheet(null));
     els.badgeToggle.addEventListener("change", async () => {
       badgeEnabled = els.badgeToggle.checked;
       try { localStorage.setItem(LS.badge, badgeEnabled ? "1" : "0"); } catch { /* session-only then */ }

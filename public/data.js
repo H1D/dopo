@@ -165,10 +165,13 @@ export async function attachSuggestions(txns, rules) {
  * @param {Category[]} categories
  * @param {DeckTxn[]} txns
  * @param {(sugs: Map<number, UISuggestion>) => void} onSlice
+ * @param {{model?: string, concurrency?: number}} [opts]  free-tier overrides (lib/freekey.js)
  * @returns {Promise<void>}
  */
-export async function classifyPass1(orToken, categories, txns, onSlice) {
+export async function classifyPass1(orToken, categories, txns, onSlice, opts = {}) {
   await classifyTransactions(orToken, txns, categories, {
+    model: opts.model,
+    concurrency: opts.concurrency,
     onBatch: (results) => {
       const now = new Date().toISOString();
       /** @type {Map<number, UISuggestion>} */
