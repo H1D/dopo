@@ -21,6 +21,11 @@
  *   a second AudioWorkletNode wired into the same bus would double audio.
  * - Tracks are cross-origin (R2); the SW ignores foreign origins by design,
  *   so caching is page-level Cache API: cache-on-play + prefetch next-in-bag.
+ * - OS pause signals are law: music renders through a MediaStream-fed <audio>
+ *   sink (see sfx.js createAudioBus) with Media Session metadata/handlers, so
+ *   lock-screen and headphone pause/play/next work. Any pause freezes the
+ *   MODULE too (the sink is a live stream — a running worklet would walk the
+ *   bag inaudibly), and an OS pause survives tab-visibility round-trips.
  */
 
 import { advance, applyBan, currentTrack, normalizeState, peekNext } from "./shuffle.js";
@@ -53,6 +58,8 @@ const MAX_CONSECUTIVE_FAILURES = 3;
  * @property {(h: {(meta: {dur?: number, title?: string, artist?: string}): void}) => void} onMetadata
  * @property {(buf: ArrayBuffer) => void} play
  * @property {() => void} stop
+ * @property {() => void} pause    worklet renders silence, position kept
+ * @property {() => void} unpause
  * @property {(n: number) => void} setRepeatCount
  */
 
@@ -105,13 +112,88 @@ export function createMusic({ bus, onTrackChange, anyAudioOn }) {
   /** @type {ArrayBuffer|null} */
   let readyBuf = null; // pre-fetched bytes for the current track
   let muted = false;
+  let osPaused = false; // the OS/user paused via a media control — respect it
+  let expectElPause = false; // our own mediaEl.pause() calls, not OS signals
 
   const persist = () => { try { musicStateSave(state); } catch { /* bag restarts next session */ } };
+
+  /** @param {MediaSessionPlaybackState} s */
+  const setPlaybackState = (s) => {
+    try { if ("mediaSession" in navigator) navigator.mediaSession.playbackState = s; }
+    catch { /* additive only */ }
+  };
 
   const notify = () => {
     const t = enabled ? byId.get(currentTrack(state) ?? "") : undefined;
     onTrackChange(t ? { title: t.title, author: t.author } : null);
+    // Lock screen / media hub: the same attribution the popover shows.
+    try {
+      if ("mediaSession" in navigator) {
+        navigator.mediaSession.metadata = t
+          ? new MediaMetadata({
+              title: t.title,
+              artist: t.author,
+              album: "dopo",
+              artwork: [{ src: "icon-512.png", sizes: "512x512", type: "image/png" }],
+            })
+          : null;
+      }
+    } catch { /* additive only */ }
   };
+
+  /** Start (or restart) the media-element sink; outside a gesture this can
+   * reject under autoplay policy — caught, the next gesture retries. */
+  const mediaPlay = () => {
+    if (bus.mediaEl && bus.mediaEl.paused) void bus.mediaEl.play().catch(() => { /* additive only */ });
+  };
+  const mediaPause = () => {
+    if (bus.mediaEl && !bus.mediaEl.paused) {
+      expectElPause = true;
+      bus.mediaEl.pause();
+    }
+  };
+
+  /** An OS-level pause signal (media key, lock screen, headphones, incoming
+   * call). Freeze the module position too — the element sink is a LIVE
+   * stream, so leaving the worklet running would let the track (and the
+   * whole bag) advance silently while "paused". */
+  function pauseFromOS() {
+    if (!enabled || !started) return;
+    osPaused = true;
+    player?.pause();
+    mediaPause();
+    setPlaybackState("paused");
+  }
+
+  /** The matching OS play signal. Media-session callbacks carry user
+   * activation, so resume() is permitted here even from the lock screen. */
+  function resumeFromOS() {
+    if (!enabled) return;
+    osPaused = false;
+    void ctx.resume().catch(() => { /* additive only */ });
+    player?.unpause();
+    mediaPlay();
+    setPlaybackState("playing");
+  }
+
+  try {
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.setActionHandler("pause", pauseFromOS);
+      navigator.mediaSession.setActionHandler("play", resumeFromOS);
+      navigator.mediaSession.setActionHandler("nexttrack", () => api.skip());
+    }
+  } catch { /* additive only */ }
+
+  // Some platforms pause the element directly (audio-focus loss, wired
+  // headphone buttons) without dispatching a media-session action. An
+  // element pause we didn't initiate IS an OS pause signal.
+  bus.mediaEl?.addEventListener("pause", () => {
+    if (expectElPause) { expectElPause = false; return; }
+    if (enabled && started && !osPaused && !document.hidden) pauseFromOS();
+  });
+  bus.mediaEl?.addEventListener("play", () => {
+    if (osPaused) resumeFromOS();
+  });
 
   /** @param {string} id @returns {string} */
   const urlOf = (id) => `${MUSIC_ORIGIN}/${byId.get(id)?.file ?? id}`;
@@ -251,6 +333,11 @@ export function createMusic({ bus, onTrackChange, anyAudioOn }) {
     // endLatch is NOT cleared here — onMetadata does it (see initPlayer).
     player.play(buf);
     player.setRepeatCount(0); // undo a previous track's short-looper bump
+    // A fresh track always plays audibly: an explicit start overrides a
+    // stale OS pause (skip from the lock screen implies "and play it").
+    osPaused = false;
+    mediaPlay();
+    setPlaybackState("playing");
   }
 
   /** Boot-time engine + data warm-up; everything here is gesture-free. */
@@ -293,6 +380,7 @@ export function createMusic({ bus, onTrackChange, anyAudioOn }) {
     if (!enabled || started) return;
     started = true;
     void ctx.resume().catch(() => { /* additive only */ });
+    mediaPlay(); // inside the gesture: the element sink unlocks here too
     if (!prewarmed) {
       // pre-warm still running (or never started): flag the intent — its tail
       // plays as soon as bytes are ready. A settled promise re-runs nothing,
@@ -318,10 +406,24 @@ export function createMusic({ bus, onTrackChange, anyAudioOn }) {
   let resumeRetryArmed = false;
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
+      // Pause the module and the element sink BEFORE suspending: the stream
+      // is live, so a still-running worklet would walk the bag inaudibly.
+      if (enabled && started && !osPaused) {
+        player?.pause();
+        mediaPause();
+        setPlaybackState("paused");
+      }
       if (ctx.state === "running") void ctx.suspend().catch(() => { /* additive only */ });
     } else {
       if (!anyAudioOn()) return;
       void ctx.resume().catch(() => { /* additive only */ });
+      // Hidden-pause undoes itself on return — but an OS pause does NOT:
+      // if the user paused from the lock screen, coming back keeps it paused.
+      if (enabled && started && !osPaused) {
+        player?.unpause();
+        mediaPlay();
+        setPlaybackState("playing");
+      }
       // iOS parks the context in "interrupted" after lock/background; resume()
       // there can silently fail until the next gesture — retry on one (a
       // single armed retry; repeated hide/show cycles must not stack them).
@@ -337,12 +439,13 @@ export function createMusic({ bus, onTrackChange, anyAudioOn }) {
     }
   });
 
-  return {
+  const api = {
     /** Settings toggle → on. The toggle click itself is the unlock gesture. */
     enable() {
       if (enabled) return;
       enabled = true;
       failStreak = 0;
+      osPaused = false;
       if (started) {
         // same-session re-enable: resume the walk where it stood
         started = false;
@@ -357,6 +460,8 @@ export function createMusic({ bus, onTrackChange, anyAudioOn }) {
       generation++;
       endLatch = true; // swallow the end-flood from the stop below
       player?.stop();
+      mediaPause();
+      setPlaybackState("none");
       notify();
     },
 
@@ -373,6 +478,7 @@ export function createMusic({ bus, onTrackChange, anyAudioOn }) {
       if (!enabled || !player) return;
       endLatch = true;
       player.stop();
+      player.unpause(); // a skip while OS-paused means "play the next one"
       failStreak = 0;
       void advanceAndPlay(++generation);
     },
@@ -404,4 +510,5 @@ export function createMusic({ bus, onTrackChange, anyAudioOn }) {
       return enabled && t ? { title: t.title, author: t.author } : null;
     },
   };
+  return api;
 }
