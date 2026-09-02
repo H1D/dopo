@@ -54,6 +54,7 @@ export class ORError extends Error {
  * @property {number|null} category_id
  * @property {number} confidence
  * @property {string} reasoning
+ * @property {string} [merchant]  echo of the input row's merchant (row-swap guard)
  */
 
 /**
@@ -238,8 +239,8 @@ ${categoryList(categories)}
 Transactions:
 ${JSON.stringify(txns, null, 1)}
 
-For EVERY transaction return the best category. Use null for category_id only if you genuinely cannot tell. Respond with ONLY a JSON object of this exact shape:
-{"suggestions": [{"id": <txn id>, "category_id": <category id or null>, "confidence": <0..1>, "reasoning": "<one short sentence>"}]}`;
+For EVERY transaction return the best category. Use null for category_id only if you genuinely cannot tell. In "merchant", copy that transaction's merchant field EXACTLY — it ties your answer to the right row. Respond with ONLY a JSON object of this exact shape:
+{"suggestions": [{"id": <txn id>, "merchant": "<exact copy of that transaction's merchant field>", "category_id": <category id or null>, "confidence": <0..1>, "reasoning": "<one short sentence>"}]}`;
 
   const content = await complete(apiKey, MODEL, prompt);
   /** @type {{suggestions?: Suggestion[]}} */
@@ -256,6 +257,9 @@ For EVERY transaction return the best category. Use null for category_id only if
   return txns.map((t) => {
     const s = byId.get(t.id);
     if (!s) return { id: t.id, category_id: null, confidence: 0, reasoning: "model returned no suggestion" };
+    if (!echoMatches(s, t)) {
+      return { id: t.id, category_id: null, confidence: 0, reasoning: "model mixed up rows in the batch; suggestion discarded" };
+    }
     return {
       id: t.id,
       category_id: s.category_id !== null && validIds.has(s.category_id) ? s.category_id : null,
@@ -263,6 +267,29 @@ For EVERY transaction return the best category. Use null for category_id only if
       reasoning: String(s.reasoning ?? "").slice(0, 300),
     };
   });
+}
+
+/** @param {unknown} s @returns {string} case/whitespace-insensitive echo form */
+function normEcho(s) {
+  return String(s).toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Row-swap guard. Flash models occasionally duplicate one row's answer under a
+ * neighbouring row's id when emitting batched JSON; the echoed merchant exposes
+ * that, so a mismatch discards the suggestion (the txn falls through to pass 2)
+ * instead of caching a confident lie. A missing/empty echo is accepted — no
+ * echo is unverifiable, and rejecting it would zero out every suggestion from
+ * a model that ignores the instruction. Matching raw_payee also passes: some
+ * models echo the original string rather than the cleaned merchant.
+ * @param {Suggestion} s
+ * @param {TxnForLLM} t
+ * @returns {boolean}
+ */
+function echoMatches(s, t) {
+  if (typeof s.merchant !== "string" || !s.merchant.trim()) return true;
+  const e = normEcho(s.merchant);
+  return e === normEcho(t.merchant) || e === normEcho(t.raw_payee);
 }
 
 /**

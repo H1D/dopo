@@ -113,6 +113,46 @@ describe("classifyBatch — pass-1 request shaping", () => {
     expect(out[1]).toEqual({ id: 2, category_id: null, confidence: 0, reasoning: "model returned no suggestion" });
   });
 
+  test("merchant echo mismatch discards the suggestion (row-swap guard)", async () => {
+    // The real-world failure: the model duplicated the McDonald's row's answer
+    // under the Decathlon txn's id. The wrong echo must kill it; the txn degrades
+    // to a null suggestion so pass 2 can pick it up.
+    mock = new MockFetch()
+      .route(() => json({
+        choices: [{ message: { content: JSON.stringify({ suggestions: [
+          { id: 1, merchant: "Merchant 2", category_id: 101, confidence: 0.95, reasoning: "answer for the wrong row" },
+          { id: 2, merchant: "Merchant 2", category_id: 102, confidence: 0.9, reasoning: "right row" },
+        ] }) } }],
+      }))
+      .install();
+    const out = await classifyBatch("k", CATS, [txn(1), txn(2)]);
+    expect(out[0]).toEqual({ id: 1, category_id: null, confidence: 0, reasoning: "model mixed up rows in the batch; suggestion discarded" });
+    expect(out[1]).toEqual({ id: 2, category_id: 102, confidence: 0.9, reasoning: "right row" });
+  });
+
+  test("echo tolerates case/whitespace drift, raw_payee echoes, and absence", async () => {
+    mock = new MockFetch()
+      .route(() => json({
+        choices: [{ message: { content: JSON.stringify({ suggestions: [
+          { id: 1, merchant: "  merchant   1 ", category_id: 101, confidence: 0.9, reasoning: "cosmetic drift ok" },
+          { id: 2, merchant: "RAW*Merchant 2", category_id: 101, confidence: 0.9, reasoning: "raw payee echo ok" },
+          { id: 3, category_id: 101, confidence: 0.9, reasoning: "no echo still accepted" },
+        ] }) } }],
+      }))
+      .install();
+    const out = await classifyBatch("k", CATS, [txn(1), txn(2), txn(3)]);
+    expect(out.map((s) => s.category_id)).toEqual([101, 101, 101]);
+  });
+
+  test("prompt asks for the merchant echo", async () => {
+    mock = new MockFetch()
+      .route((url, init) => (url.includes("/chat/completions") ? pass1Response(JSON.parse(init!.body as string)) : null))
+      .install();
+    await classifyBatch("k", CATS, [txn(1)]);
+    const prompt = (mock.callsTo("/chat/completions")[0]!.body as { messages: { content: string }[] }).messages[0]!.content;
+    expect(prompt).toContain('"merchant": "<exact copy of that transaction\'s merchant field>"');
+  });
+
   test("non-2xx throws ORError with status", async () => {
     mock = new MockFetch().route(() => json({ error: "rate limited" }, 429)).install();
     const err = await classifyBatch("k", CATS, [txn(1)]).catch((e) => e);
