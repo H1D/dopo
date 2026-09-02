@@ -135,10 +135,18 @@ source of truth for transaction data; the device is the source of truth for pend
 
 ## CSP & XSS
 
-- Meta CSP as the FIRST element in <head> of every HTML file (before any link/script):
+- Meta CSP as the FIRST element in <head> of every HTML file (before any link/script). Baseline
+  (offline.html keeps exactly this):
   `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; manifest-src 'self';
   connect-src 'self' https://api.lunchmoney.dev https://openrouter.ai; base-uri 'self';
   form-action 'none'; object-src 'none'` (frame-ancestors impossible via meta — never claimed).
+- index.html diverges in exactly two directives (CI enforces per-file expectations, gate 2):
+  connect-src additionally allows `https://dopo-music.artems.net` (the music CDN), and script-src is
+  `'self' 'wasm-unsafe-eval'`. The wasm token is required because the vendored libopenmpt worklet
+  compiles its embedded wasm synchronously (`new WebAssembly.Module`); unlike `unsafe-eval` it
+  enables nothing but wasm compilation. It is the ONE permitted `unsafe-` token, directive-scoped —
+  any other occurrence anywhere in the policy fails CI. CSP is never widened beyond this: if a
+  future vendor needs blob:/eval, the vendored copy gets patched instead.
 - ZERO inline <script>, <style>, or style= attributes in any HTML (externalize offline.html
   styles; boot.js replaces the inline SW registration).
 - Card markup built through a PURE exported template function (`cardHTML(txn, ...)`) so bun tests can
@@ -173,14 +181,46 @@ source of truth for transaction data; the device is the source of truth for pend
 
 ## CI (rewritten)
 
-- bun test (lib fixtures: lm shapes incl. status:"reviewed" PUT body, rules, clean, cardHTML XSS).
-- tsc --noEmit --allowJs --checkJs over JSDoc-annotated public modules.
-- Greps: no inline script/style/style= in HTML; CSP meta is first in head; esc() tripwire;
-  fetch-context URLs outside {self, api.lunchmoney.dev, openrouter.ai} forbidden (navigation hrefs
-  allowlisted: my.lunchmoney.app, openrouter.ai, lunchmoney.app docs).
+- bun test (lib fixtures: lm shapes incl. status:"reviewed" PUT body, rules, clean, cardHTML XSS,
+  music shuffle-bag).
+- tsc --noEmit --allowJs --checkJs over JSDoc-annotated public modules (sw.js and public/vendor
+  excluded — vendor is upstream code, integrity-pinned instead).
+- Greps: no inline script/style/style= in HTML; CSP meta is first in head AND matches the per-file
+  expected policy (see CSP & XSS); esc() tripwire; fetch-context URLs outside
+  {self, api.lunchmoney.dev, openrouter.ai, dopo-music.artems.net} forbidden (navigation hrefs
+  allowlisted: my.lunchmoney.app, openrouter.ai, lunchmoney.app docs). Text gates skip
+  public/vendor/**.
+- Vendor integrity: every file under public/vendor/** must match its sha256 in vendor.lock (both
+  directions). Vendored code runs next to the finance tokens; the hash pin replaces the text gates
+  for that subtree, and re-vendoring produces a reviewable vendor.lock diff. Local patches to
+  vendored files are documented in the vendor dir's PATCHES.md.
 - Assert package.json has no `dependencies`. gitleaks. Pages artifact build from dist/.
 - Actions pinned by commit SHA; permissions minimal (contents: read; pages: write + id-token: write
   on the deploy job only).
+
+## Audio (chiptune music + SFX; owner-approved, added post-v1)
+
+- Both settings toggles OFF by default; everything audio is additive-only (haptic() contract: any
+  failure degrades to silence, never a broken swipe). Prefs in `dopo.audio.v1`.
+- SFX: pure Web Audio synthesis in lib/sfx.js — zero assets, zero new origins. One shared
+  AudioContext, two gain buses (music 0.4 / sfx 0.7), master compressor configured as a limiter.
+- Music: lib/music.js + the vendored chiptune3/libopenmpt AudioWorklet player
+  (public/vendor/chiptune3-<ver>/, integrity-pinned, local patches in PATCHES.md). Tracks are scene
+  tracker modules served from the `dopo-music` R2 bucket at https://dopo-music.artems.net
+  (CORS-restricted to the app origins, X-Robots-Tag: noindex). Track binaries NEVER enter this
+  repo; attribution lives in music/manifest.json + MUSIC.md (takedown: GitHub issues).
+- Shuffle-bag (lib/shuffle.js, pure + unit-tested) persists in `dopo.music.v1`: every track plays
+  before repeats, walk survives sessions, each app open advances, reshuffle avoids immediate
+  repeats, ban list is permanent.
+- Cache taxonomy: `dopo-static-<hash>` (SW precache, purged per version) · `dopo-vendor`
+  (persistent, SW vendor/ route, hardened fill identical to install, pruned of dead versions by
+  music.js) · `dopo-music-v1` (persistent, page-level Cache API — the SW never intercepts the
+  cross-origin music fetches; cache-on-play + prefetch next-in-bag). The SW activate purge deletes
+  ONLY `dopo-static-*`.
+- Autoplay policy: context unlocks on the first natural gesture; engine and first track are
+  pre-warmed before it. Tab hidden = ctx.suspend (position preserved). iOS: `interrupted` state gets
+  a one-shot pointerdown resume retry; the ring/silent switch muting Web Audio is a documented
+  limitation (Settings sub-text + MUSIC.md), no silent-<audio> workaround shipped.
 
 ## Publishing (owner-approved: public repo + public URL)
 

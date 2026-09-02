@@ -26,11 +26,15 @@ jobs:
       - name: Typecheck (strict checkJs over public/ modules)
         run: bunx tsc --noEmit
 
-      # Gates: no inline script/style/style= in HTML; CSP meta first in <head>;
+      # Gates: no inline script/style/style= in HTML; CSP meta first in <head>
+      # and matches the per-file expected policy (index.html: + music CDN,
+      # script-src 'self' 'wasm-unsafe-eval'; offline.html: baseline);
       # esc() interpolation tripwire; external-URL allowlist (fetch: self +
-      # api.lunchmoney.dev + openrouter.ai; nav hrefs: my.lunchmoney.app,
-      # openrouter.ai, lunchmoney.app); sw.js precache == public/ contents;
-      # __DOPO_VERSION__ placeholder intact; package.json has no dependencies.
+      # api.lunchmoney.dev + openrouter.ai + dopo-music.artems.net; nav hrefs:
+      # my.lunchmoney.app, openrouter.ai, lunchmoney.app); sw.js precache ==
+      # public/ contents (vendor/ exempt one-directionally); vendor.lock sha256
+      # pin over public/vendor/**; __DOPO_VERSION__ placeholder intact;
+      # package.json has no dependencies.
       - name: Static tree checks
         run: bun scripts/ci-checks.ts
 

@@ -178,6 +178,54 @@ header.top {
 }
 .menu-pop a:active, .menu-pop button:active { background: var(--accent-bg); }
 
+.music-chip { color: var(--accent); }
+.music-pop {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  /* Same fallback placement rules as .menu-pop: under the header band. */
+  top: calc(env(safe-area-inset-top) + 46px);
+  right: 14px;
+  background: var(--card);
+  color: var(--ink); /* UA [popover] forces CanvasText */
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 12px;
+  min-width: 210px;
+  max-width: 280px;
+}
+.music-pop:popover-open {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.music-title {
+  font-size: 14px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.music-author {
+  font-size: 12px;
+  color: var(--muted);
+}
+.music-controls {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.music-controls button {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: none;
+  color: var(--ink);
+}
+.music-controls button:active { background: var(--accent-bg); }
+
 /* ---------- progress ---------- */
 
 .progress {

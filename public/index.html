@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; manifest-src 'self'; connect-src 'self' https://api.lunchmoney.dev https://openrouter.ai; base-uri 'self'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self'; manifest-src 'self'; connect-src 'self' https://api.lunchmoney.dev https://openrouter.ai https://dopo-music.artems.net; base-uri 'self'; form-action 'none'; object-src 'none'">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#2a6b64">
@@ -17,6 +17,16 @@
   <div class="streak" id="streak" hidden aria-label="streak">🔥<span id="streakN">0</span></div>
   <div class="chip conn-chip" id="connChip" hidden aria-live="polite"></div>
   <button class="chip" id="laterChip" hidden>💤 Later · <span id="laterN">0</span></button>
+  <button class="chip music-chip" id="musicChip" hidden aria-label="Now playing" popovertarget="musicPop">♪</button>
+  <div class="music-pop" id="musicPop" popover>
+    <div class="music-title" id="musicTitle">—</div>
+    <div class="music-author" id="musicAuthor"></div>
+    <div class="music-controls">
+      <button id="musicSkip" type="button">⏭ Skip</button>
+      <button id="musicMute" type="button">🔇 Mute</button>
+      <button id="musicBan" type="button">🚫 Never again</button>
+    </div>
+  </div>
   <div class="menu">
     <button id="menuBtn" aria-label="Menu" aria-haspopup="true" popovertarget="menuPop">⋯</button>
     <div class="menu-pop" id="menuPop" popover>
@@ -129,6 +139,21 @@
       <input type="checkbox" id="badgeToggle">
       <span class="toggle-text">Badge on the app icon
         <span class="toggle-sub">Shows how many cards were left to sort when you last closed dopo.</span>
+      </span>
+    </label>
+    <div class="sheet-section">Sound</div>
+    <label class="toggle-row">
+      <input type="checkbox" id="musicToggle">
+      <span class="toggle-text">Chiptune music
+        <span class="toggle-sub">Keygen-era tracker tunes while you sort — shuffled, a fresh one
+          every visit. The ♪ button up top shows what's playing. On iPhone the
+          ring/silent switch must be set to ring.</span>
+      </span>
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" id="sfxToggle">
+      <span class="toggle-text">Sound effects
+        <span class="toggle-sub">Bleeps on swipes, thuds on landings, a fanfare at inbox zero.</span>
       </span>
     </label>
     <div class="field-error" id="settingsError" hidden></div>

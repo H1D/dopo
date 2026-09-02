@@ -44,6 +44,9 @@ const PRECACHE = [
   "lib/rules.js",
   "lib/clean.js",
   "lib/dust.js",
+  "lib/music.js",
+  "lib/sfx.js",
+  "lib/shuffle.js",
   "lib/store.js",
   "lib/sync.js",
   "offline.html",
@@ -108,9 +111,13 @@ self.addEventListener("activate", (event) => {
     if (self.registration.navigationPreload) {
       try { await self.registration.navigationPreload.enable(); } catch { /* optional */ }
     }
-    // Drop every non-current cache BEFORE claiming clients.
+    // Drop stale VERSIONED caches before claiming clients — and ONLY those.
+    // The origin's Cache Storage also holds two persistent caches this purge
+    // must spare: "dopo-vendor" (the chiptune engine, filled by the vendor
+    // route below) and "dopo-music-v1" (page-cached music tracks). Wiping
+    // them on every deploy would re-download megabytes per version bump.
     const names = await caches.keys();
-    await Promise.all(names.filter((n) => n !== CACHE).map((n) => caches.delete(n)));
+    await Promise.all(names.filter((n) => n.startsWith("dopo-static-") && n !== CACHE).map((n) => caches.delete(n)));
     await self.clients.claim();
   })());
 });
@@ -150,6 +157,32 @@ self.addEventListener("fetch", (event) => {
         const cached = (shell && (await fromCache(shell))) || (await fromCache(OFFLINE_PATH));
         return cached || Response.error();
       }
+    })());
+    return;
+  }
+
+  // Vendored chiptune engine: cache-first from a PERSISTENT cache that
+  // survives version bumps (the files live in a release-versioned dir, so a
+  // vendor upgrade changes the URL; lib/music.js prunes dead versions).
+  // The fill applies the SAME hardening as install — behind Cloudflare Access
+  // an expired session resolves subresource fetches as a 200 login page, and
+  // a poisoned entry here would be served forever.
+  if (req.method === "GET" && url.pathname.startsWith(scoped("vendor/"))) {
+    event.respondWith((async () => {
+      const cache = await caches.open("dopo-vendor");
+      const cached = await cache.match(url.pathname);
+      if (cached) return cached;
+      const res = await fetch(url.pathname, {
+        redirect: "follow",
+        cache: "reload", // bypass HTTP cache so a stale login page can't sneak in
+        credentials: "same-origin",
+      });
+      if (res.status === 200 &&
+          (!res.url || new URL(res.url).origin === self.location.origin) &&
+          contentTypeOk(url.pathname, res)) {
+        await cache.put(url.pathname, res.clone());
+      }
+      return res;
     })());
     return;
   }

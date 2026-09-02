@@ -24,6 +24,7 @@ import {
   laterLoad, laterAdd, laterRemove,
   rulesLoad, ruleAdd, rulesSave,
   cutoffLoad, cutoffSave, fetchWindow,
+  audioLoad, audioSave,
 } from "./lib/store.js";
 import { replayQueue, isPoisonStatus, STUCK_AFTER_ATTEMPTS } from "./lib/sync.js";
 import {
@@ -32,7 +33,9 @@ import {
 import {
   esc, splitEmoji, fmtAmountText, fmtTxnDate, isConfident as cardConfident, cardHTML, CONFIDENT_AT,
 } from "./lib/card.js";
-import { createDust, heft, referenceAmount } from "./lib/dust.js";
+import { createDust, heft, referenceAmount, QUAKE_AT } from "./lib/dust.js";
+import { createAudioBus, createSfx } from "./lib/sfx.js";
+import { createMusic } from "./lib/music.js";
 
 /** @typedef {import("./data.js").DeckTxn} Txn */
 /** @typedef {import("./data.js").UISuggestion} UISuggestion */
@@ -229,6 +232,7 @@ function main() {
   let sugToastShown = false; // "N suggestions ready" fires at most once per visit
   let badgeEnabled = false;
   try { badgeEnabled = localStorage.getItem(LS.badge) === "1"; } catch { /* default off */ }
+  let audioPrefs = audioLoad(); // { music, sfx } — both strictly opt-in
   // pass-2 web-check session state
   let webChecksUsed = 0; // unique merchants spent this session
   let webExtraAllowance = 0; // granted by the explicit "Web-check N more" button
@@ -303,6 +307,10 @@ function main() {
     cutoffRow: $el("#cutoffRow"), cutoffLine: $el("#cutoffLine"),
     rulesNote: $el("#rulesNote"), rulesList: $el("#rulesList"),
     badgeToggle: $input("#badgeToggle"), settingsError: $el("#settingsError"), menuSettings: $btn("#menuSettings"),
+    musicToggle: $input("#musicToggle"), sfxToggle: $input("#sfxToggle"),
+    musicChip: $btn("#musicChip"), musicPop: $el("#musicPop"),
+    musicTitle: $el("#musicTitle"), musicAuthor: $el("#musicAuthor"),
+    musicSkip: $btn("#musicSkip"), musicMute: $btn("#musicMute"), musicBan: $btn("#musicBan"),
     onboardCard: $el("#onboardCard"), onboardOpen: $btn("#onboardOpen"),
     webBar: $el("#webBar"), webBarBtn: $btn("#webBarBtn"),
     connChip: $el("#connChip"), staleBanner: $el("#staleBanner"), stuckBanner: $btn("#stuckBanner"),
@@ -936,7 +944,8 @@ function main() {
     startUndo(u);
     updateStreakUI(true);
     haptic(12);
-    if (decisions % 10 === 0) { confetti(90); haptic([14, 50, 14]); }
+    fx()?.swipe(u.kind === "park" ? "park" : u.viaPicker ? "pick" : "accept");
+    if (decisions % 10 === 0) { confetti(90); haptic([14, 50, 14]); fx()?.streak(); }
   }
 
   /** Remove the DECIDED card from data + move meters; call AFTER the queue push.
@@ -1184,7 +1193,12 @@ function main() {
     const hefted = landed === "deal"
       ? Math.max(...want.map((t) => heft(t.amount, amountRef)))
       : heft(want[0]?.amount, amountRef);
-    if (landed) dust.blast(els.stack, landed, hefted);
+    if (landed) {
+      dust.blast(els.stack, landed, hefted);
+      fx()?.thud(hefted);
+      // same threshold as the visual quake — sound and shake are one event
+      if (hefted >= QUAKE_AT) fx()?.rumble((hefted - QUAKE_AT) / (1 - QUAKE_AT));
+    }
     updateActionButtons();
   }
 
@@ -1195,6 +1209,58 @@ function main() {
   dust.preload();
   matchMedia("(prefers-color-scheme: dark)")
     .addEventListener("change", () => dust.onThemeChange());
+
+  /* ---------- audio ----------
+     lib/sfx.js synthesizes the effects, lib/music.js runs the chiptune player.
+     Strictly opt-in (both toggles default off) and additive-only: nothing in
+     here may break a swipe — mirrors the haptic() contract. */
+  /** @type {import("./lib/sfx.js").AudioBus|null} */
+  let audioBus = null;
+  /** @type {ReturnType<typeof createSfx>|null} */
+  let sfxKit = null;
+  /** @type {ReturnType<typeof createMusic>|null} */
+  let music = null;
+  function ensureAudio() {
+    if (audioBus) return;
+    try {
+      audioBus = createAudioBus();
+      sfxKit = createSfx(audioBus);
+      music = createMusic({
+        bus: audioBus,
+        onTrackChange: renderMusicPop,
+        anyAudioOn: () => audioPrefs.music || audioPrefs.sfx,
+      });
+    } catch { audioBus = null; /* additive only */ }
+  }
+  /** SFX facade — null unless the toggle is on, so call sites stay one-liners. */
+  const fx = () => (audioPrefs.sfx ? sfxKit : null);
+  /** @param {{title: string, author: string}|null} now */
+  function renderMusicPop(now) {
+    els.musicTitle.textContent = now ? now.title : "—";
+    els.musicAuthor.textContent = now ? `by ${now.author}` : "";
+  }
+  function updateMusicChip() {
+    els.musicChip.hidden = !audioPrefs.music;
+    if (!audioPrefs.music && els.musicPop.matches(":popover-open")) els.musicPop.hidePopover();
+  }
+  // A closure, not inline: tsc pins `music` to its null initializer at this
+  // point in the flow; inside a function it uses the declared type.
+  const bootAudio = () => {
+    if (!audioPrefs.music && !audioPrefs.sfx) return;
+    ensureAudio();
+    music?.prewarm(audioPrefs.music); // engine + first track warm before any gesture
+  };
+  bootAudio();
+  updateMusicChip();
+  // Autoplay policy: the context unlocks on the first natural interaction.
+  // Consumed-once listeners are fine — later toggle clicks are gestures too.
+  const audioUnlock = () => {
+    if (!audioBus) return;
+    if (audioPrefs.music) music?.gesture();
+    else if (audioPrefs.sfx) void audioBus.ctx.resume().catch(() => { /* additive only */ });
+  };
+  window.addEventListener("pointerdown", audioUnlock, { once: true });
+  window.addEventListener("keydown", audioUnlock, { once: true });
 
   function updateActionButtons() {
     const top = set[0] ?? null;
@@ -1798,6 +1864,8 @@ function main() {
     els.budgetLine.hidden = true;
     els.forgetBtn.hidden = !tokens.lm && !tokens.or;
     els.badgeToggle.checked = badgeEnabled;
+    els.musicToggle.checked = audioPrefs.music;
+    els.sfxToggle.checked = audioPrefs.sfx;
     renderCutoffRow();
     renderRulesList();
     if (deadField === "lm") setFieldError("lm", "This Lunch Money token stopped working — paste a fresh one.");
@@ -2083,6 +2151,7 @@ function main() {
     inboxCelebrated = true;
     confetti(190);
     haptic([20, 60, 20, 60, 40]);
+    fx()?.fanfare();
     // snapshot mode can't claim the server inbox is clear — hedge, don't "Legend."
     const sub = later.length ? `${later.length} parked for later`
       : loadState === "snapshot" && queue.length ? `All local cards sorted — ${queue.length} waiting to sync`
@@ -2389,6 +2458,36 @@ function main() {
       } else {
         setBadge(0);
       }
+    });
+    els.musicToggle.addEventListener("change", () => {
+      audioPrefs = { ...audioPrefs, music: els.musicToggle.checked };
+      try { audioSave(audioPrefs); } catch { /* session-only then */ }
+      updateMusicChip();
+      if (audioPrefs.music) {
+        ensureAudio();
+        music?.enable(); // the toggle click is the unlock gesture
+      } else {
+        music?.disable();
+        // suspend only when BOTH are off — the context is shared with SFX
+        if (!audioPrefs.sfx) void audioBus?.ctx.suspend().catch(() => { /* additive only */ });
+      }
+    });
+    els.sfxToggle.addEventListener("change", () => {
+      audioPrefs = { ...audioPrefs, sfx: els.sfxToggle.checked };
+      try { audioSave(audioPrefs); } catch { /* session-only then */ }
+      if (audioPrefs.sfx) {
+        ensureAudio();
+        void audioBus?.ctx.resume().catch(() => { /* additive only */ }); // gesture
+      } else if (!audioPrefs.music) {
+        void audioBus?.ctx.suspend().catch(() => { /* additive only */ });
+      }
+    });
+    els.musicSkip.addEventListener("click", () => music?.skip());
+    els.musicBan.addEventListener("click", () => music?.ban());
+    els.musicMute.addEventListener("click", () => {
+      if (!music) return;
+      music.setMuted(!music.muted);
+      els.musicMute.textContent = music.muted ? "🔊 Unmute" : "🔇 Mute";
     });
 
     els.menuAccounts.addEventListener("click", () => { closeMenu(); openAcctSheet(); });
