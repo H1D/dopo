@@ -3,16 +3,28 @@
 // Gates (all spec-mandated, see SPEC-STATIC.md "CI"):
 //   1. HTML hygiene: zero <style>, zero style= attributes, zero inline on*=
 //      handlers, every <script> tag has src= (no inline scripts).
-//   2. CSP meta is the FIRST element inside <head> of every public/*.html.
+//   2. CSP meta is the FIRST element inside <head> of every public/*.html, and
+//      its content matches the per-file expectation (CSP_EXPECT): index.html
+//      adds the music CDN to connect-src and 'wasm-unsafe-eval' (the one
+//      permitted unsafe- token, directive-scoped) to script-src; offline.html
+//      stays minimal.
 //   3. esc() tripwire: on any HTML-ish JS line (opening tag or inner/outerHTML),
 //      every ${...} interpolation must be `esc(...)`, `Number(...)`, or a bare
 //      identifier ending in `Html` (pre-escaped fragment accumulator).
 //   4. URL allowlist: fetch-context origins limited to self + api.lunchmoney.dev
-//      + openrouter.ai; navigation hrefs may additionally use my.lunchmoney.app /
-//      lunchmoney.app; svg may reference the w3.org xmlns. Nothing else, anywhere.
-//   5. sw.js PRECACHE exactly matches the files present in public/ (minus sw.js).
+//      + openrouter.ai + dopo-music.artems.net; navigation hrefs may additionally
+//      use my.lunchmoney.app / lunchmoney.app; svg may reference the w3.org
+//      xmlns. Nothing else, anywhere.
+//   5. sw.js PRECACHE exactly matches the files present in public/ (minus sw.js;
+//      vendor/ is exempt one-directionally — lazily cached by the sw vendor route).
 //   6. sw.js still contains the __DOPO_VERSION__ placeholder (stamped only in dist/).
-//   7. package.json has no "dependencies" key (zero runtime deps).
+//   7. dust sprite frame/cell/timing constants agree across baker, sim and CSS.
+//   8. package.json has no "dependencies" key (zero runtime deps).
+//   9. public/vendor/** matches vendor.lock sha256s exactly (gates 3/4 don't
+//      scan vendor code; the hash pin replaces them).
+//
+// Gates 3 + 4 skip public/vendor/** (see isVendored); gate 9 is their
+// replacement for that subtree.
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -42,6 +54,23 @@ const ext = (rel: string) => rel.slice(rel.lastIndexOf("."));
 
 // ---- 1 + 2: HTML hygiene + CSP-first ---------------------------------------
 
+// Per-file CSP expectations. index.html carries the app: its connect-src adds
+// the music CDN and its script-src adds 'wasm-unsafe-eval' — the ONE unsafe-
+// token this repo permits, because the vendored libopenmpt worklet compiles
+// its embedded wasm with `new WebAssembly.Module` (sync). Unlike unsafe-eval
+// it enables nothing but wasm compilation. offline.html runs no scripts and
+// stays at the minimal policy — new capabilities never leak there.
+const CSP_EXPECT: Record<string, { connect: string[]; script: string[] }> = {
+  "index.html": {
+    connect: ["'self'", "https://api.lunchmoney.dev", "https://openrouter.ai", "https://dopo-music.artems.net"],
+    script: ["'self'", "'wasm-unsafe-eval'"],
+  },
+  "offline.html": {
+    connect: ["'self'", "https://api.lunchmoney.dev", "https://openrouter.ai"],
+    script: ["'self'"],
+  },
+};
+
 for (const f of files.filter((f) => f.endsWith(".html"))) {
   const html = read(f);
   if (/<style[\s>]/i.test(html)) fail(`${f}: inline <style> block (externalize to a .css file)`);
@@ -54,20 +83,34 @@ for (const f of files.filter((f) => f.endsWith(".html"))) {
   if (!/<head> ?<meta http-equiv="Content-Security-Policy"/i.test(flat)) {
     fail(`${f}: CSP meta is not the first element in <head>`);
   }
-  // The CSP is the runtime backstop for the whole privacy claim: validate its CONTENT,
-  // not just its position. connect-src must be exactly {self, LM, OR}; no wildcards/unsafe.
+  // The CSP is the runtime backstop for the whole privacy claim: validate its
+  // CONTENT, not just its position, against the per-file expectation above.
   const cspMatch = flat.match(/Content-Security-Policy" content="([^"]+)"/i);
+  const expect = CSP_EXPECT[f];
   if (!cspMatch?.[1]) {
     fail(`${f}: CSP meta has no content attribute`);
+  } else if (!expect) {
+    fail(`${f}: no CSP expectation declared for this page — add it to CSP_EXPECT in ci-checks.ts`);
   } else {
     const csp = cspMatch[1];
-    const connect = csp.match(/connect-src ([^;]+)/)?.[1]?.trim().split(/\s+/).sort() ?? [];
-    const expected = ["'self'", "https://api.lunchmoney.dev", "https://openrouter.ai"].sort();
-    if (JSON.stringify(connect) !== JSON.stringify(expected)) {
-      fail(`${f}: connect-src must be exactly {self, api.lunchmoney.dev, openrouter.ai}, got: ${connect.join(" ")}`);
+    const directive = (name: string) =>
+      csp.match(new RegExp(`${name} ([^;]+)`))?.[1]?.trim().split(/\s+/) ?? [];
+    const connect = directive("connect-src").sort();
+    if (JSON.stringify(connect) !== JSON.stringify([...expect.connect].sort())) {
+      fail(`${f}: connect-src must be exactly {${expect.connect.join(", ")}}, got: ${connect.join(" ")}`);
+    }
+    // script-src is matched as an exact token SET (directive-scoped): a
+    // wasm-unsafe-eval that drifts into any other directive, or any other
+    // unsafe- token anywhere, still fails below.
+    const script = directive("script-src").sort();
+    if (JSON.stringify(script) !== JSON.stringify([...expect.script].sort())) {
+      fail(`${f}: script-src must be exactly {${expect.script.join(" ")}}, got: ${script.join(" ")}`);
     }
     if (/[*]/.test(csp)) fail(`${f}: CSP contains a wildcard`);
-    if (/unsafe-/.test(csp)) fail(`${f}: CSP contains an unsafe- source`);
+    // Remove ONLY the vetted script-src directive value, then demand the rest
+    // of the policy is unsafe-free — never a global string strip.
+    const rest = csp.replace(/script-src [^;]+/, "script-src");
+    if (/unsafe-/.test(rest)) fail(`${f}: CSP contains an unsafe- source outside the vetted script-src`);
   }
 }
 
@@ -87,7 +130,13 @@ function okInterp(expr: string): boolean {
   return false;
 }
 
-for (const f of files.filter((f) => f.endsWith(".js") && f !== "sw.js")) {
+// Vendored third-party code (public/vendor/**) is exempt from the TEXT gates
+// (esc tripwire, URL allowlist) — it's upstream code we neither wrote nor
+// template HTML with — but NOT from integrity: gate 9 pins every vendor byte
+// to vendor.lock, so "vendored verbatim + reviewed at vendor time" is enforced.
+const isVendored = (rel: string) => rel.startsWith("vendor/");
+
+for (const f of files.filter((f) => f.endsWith(".js") && f !== "sw.js" && !isVendored(f))) {
   const lines = read(f).split("\n");
   lines.forEach((line, i) => {
     if (!/<[a-z]|innerHTML|outerHTML/i.test(line)) return;
@@ -101,11 +150,11 @@ for (const f of files.filter((f) => f.endsWith(".js") && f !== "sw.js")) {
 
 // ---- 4: URL allowlist -------------------------------------------------------
 
-const FETCH_ORIGINS = new Set(["api.lunchmoney.dev", "openrouter.ai"]);
+const FETCH_ORIGINS = new Set(["api.lunchmoney.dev", "openrouter.ai", "dopo-music.artems.net"]);
 const NAV_ORIGINS = new Set(["my.lunchmoney.app", "lunchmoney.app", "www.lunchmoney.app", "openrouter.ai"]);
 const TEXT_EXT = new Set([".js", ".html", ".css", ".webmanifest", ".svg", ".json"]);
 
-for (const f of files.filter((f) => TEXT_EXT.has(ext(f)))) {
+for (const f of files.filter((f) => TEXT_EXT.has(ext(f)) && !isVendored(f))) {
   const e = ext(f);
   read(f).split("\n").forEach((line, i) => {
     // protocol-relative URLs inside string literals would inherit https and bypass the
@@ -140,7 +189,11 @@ if (!precacheMatch) {
   const listed = new Set([...(precacheMatch[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? ""));
   const present = new Set(files.filter((f) => f !== "sw.js"));
   for (const p of listed) if (!present.has(p)) fail(`sw.js precaches "${p}" but public/${p} does not exist`);
-  for (const p of present) if (!listed.has(p)) fail(`public/${p} exists but is missing from sw.js PRECACHE`);
+  // ONE-directional vendor exemption: vendor files are lazily cached by the
+  // sw.js vendor/ route (1.5MB of engine must not be forced onto visitors who
+  // never enable music), but a stale vendor path LISTED in PRECACHE still
+  // fails via the loop above.
+  for (const p of present) if (!listed.has(p) && !isVendored(p)) fail(`public/${p} exists but is missing from sw.js PRECACHE`);
 }
 
 // ---- 7: dust sprite frame count is consistent ------------------------------
@@ -195,6 +248,35 @@ if (!precacheMatch) {
 const pkg = JSON.parse(readFileSync("package.json", "utf8")) as Record<string, unknown>;
 if ("dependencies" in pkg) {
   fail('package.json: "dependencies" key present — this project must have zero runtime deps');
+}
+
+// ---- 9: vendor integrity ----------------------------------------------------
+// public/vendor/** is exempt from the text gates above (upstream code), so this
+// is the control that replaces them: every vendored byte is pinned to a sha256
+// in vendor.lock. Vendor JS runs in-page next to the finance tokens — an
+// unpinned change there is invisible to review and CSP alone cannot stop
+// exfiltration through an allowlisted origin. Re-vendoring = new files + new
+// hashes + a reviewable vendor.lock diff.
+{
+  let lock: Record<string, unknown> = {};
+  try {
+    lock = JSON.parse(readFileSync("vendor.lock", "utf8")) as Record<string, unknown>;
+  } catch {
+    fail("vendor.lock: missing or unparsable at the repo root");
+  }
+  const vendorFiles = files.filter(isVendored).map((f) => `${PUB}/${f}`);
+  const listed = new Set(Object.keys(lock));
+  for (const rel of vendorFiles) {
+    const want = lock[rel];
+    if (typeof want !== "string") {
+      fail(`${rel}: present in public/vendor but not pinned in vendor.lock`);
+      continue;
+    }
+    const got = new Bun.CryptoHasher("sha256").update(readFileSync(rel)).digest("hex");
+    if (got !== want) fail(`${rel}: sha256 mismatch — vendor.lock has ${want.slice(0, 12)}…, file is ${got.slice(0, 12)}…`);
+    listed.delete(rel);
+  }
+  for (const rel of listed) fail(`vendor.lock pins "${rel}" but the file does not exist`);
 }
 
 // ----------------------------------------------------------------------------

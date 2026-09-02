@@ -20,6 +20,9 @@
   // sw.js is excluded: it runs in the ServiceWorker global scope, which clashes
   // with the DOM lib the page modules need. It is still covered by the CI static
   // checks (precache drift, version placeholder) in scripts/ci-checks.ts.
+  // vendor/ is excluded as upstream code — integrity-pinned via vendor.lock
+  // (ci-checks gate 9) instead of typechecked; lib/music.js imports it by
+  // computed URL so tsc never pulls it in transitively.
   "include": ["public/**/*.js", "scripts/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["public/sw.js"]
+  "exclude": ["public/sw.js", "public/vendor"]
 }

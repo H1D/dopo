@@ -29,6 +29,8 @@ export const LS_KEYS = {
   later: "dopo.later.v1",
   rules: "dopo.rules.v1",
   cutoff: "dopo.cutoff.v1",
+  audio: "dopo.audio.v1",
+  music: "dopo.music.v1",
 };
 
 // ---------------------------------------------------------------------------
@@ -311,6 +313,48 @@ export function cutoffLoad() {
  */
 export function cutoffSave(id) {
   lsSet(LS_KEYS.cutoff, CUTOFF_PRESETS.some((p) => p.id === id) ? id : DEFAULT_CUTOFF);
+}
+
+// ---------------------------------------------------------------------------
+// audio — chiptune music + sound effects, both opt-in
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} AudioPrefs
+ * @property {boolean} music  background chiptune enabled
+ * @property {boolean} sfx    synthesized sound effects enabled
+ */
+
+/** @returns {AudioPrefs} both OFF by default — audio is strictly opt-in */
+export function audioLoad() {
+  const v = lsGet(LS_KEYS.audio);
+  const o = typeof v === "object" && v !== null ? /** @type {Record<string, unknown>} */ (v) : {};
+  return { music: o.music === true, sfx: o.sfx === true };
+}
+
+/**
+ * @param {AudioPrefs} prefs
+ * @throws on storage failure — callers degrade to session-only prefs
+ */
+export function audioSave(prefs) {
+  lsSet(LS_KEYS.audio, { music: prefs.music === true, sfx: prefs.sfx === true });
+}
+
+/**
+ * Raw persisted shuffle-bag state; lib/shuffle.js normalizeState() owns the
+ * shape validation because it also reconciles against the live manifest.
+ * @returns {unknown}
+ */
+export function musicStateLoad() {
+  return lsGet(LS_KEYS.music);
+}
+
+/**
+ * @param {import("./shuffle.js").MusicState} state
+ * @throws on storage failure — the bag then simply restarts next session
+ */
+export function musicStateSave(state) {
+  lsSet(LS_KEYS.music, state);
 }
 
 /**

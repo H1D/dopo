@@ -1,0 +1,6 @@
+{
+  "public/vendor/chiptune3-0.8.7/PATCHES.md": "e292b9dc627b2279fd3f9494650f3fc7d7df0719853ac5a87011a660f2e56897",
+  "public/vendor/chiptune3-0.8.7/chiptune3.js": "22f8e77423fa00a190edfc1057c11e24804baac9f3c174a90c3800f8107f2158",
+  "public/vendor/chiptune3-0.8.7/chiptune3.worklet.js": "bd627bbedbe6533edc166c48db2bf8efe4e84437955c7b9bcf8baa7b565fdda4",
+  "public/vendor/chiptune3-0.8.7/libopenmpt.worklet.js": "31e39ff57d48bcc8c1fd9c04df16b1f8ec682cadb99d7c2f5bd682ca34e90554"
+}
