@@ -43,6 +43,7 @@
 <div class="meter" id="meter">loading…</div>
 <div class="stale-banner" id="staleBanner" hidden></div>
 <button class="stuck-banner" id="stuckBanner" type="button" hidden></button>
+<button class="upgrade-banner" id="upgradeBanner" type="button" hidden></button>
 
 <main class="stage" id="stage">
   <div class="stack" id="stack" aria-live="polite"></div>
@@ -119,8 +120,10 @@
     <div class="field">
       <label class="field-label" for="orTokenInput">OpenRouter API key</label>
       <input class="field-input" id="orTokenInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste key">
-      <div class="field-sub">Optional — enables AI suggestions. Create a dedicated key with a
-        spend limit at <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</div>
+      <div class="field-sub">Optional. Without one, dopo uses a shared free key: a smaller free
+        model, a daily quota shared by everyone, no web checks — and free models may train on
+        what they see. Your own key lifts all of that: create a dedicated one with a spend limit at
+        <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</div>
       <div class="field-hint" id="orTokenHint" hidden></div>
       <div class="field-error" id="orTokenError" hidden></div>
     </div>
@@ -170,7 +173,7 @@
       on this device and go only to Lunch Money and OpenRouter — there is no server.</p>
     <ol class="onboard-steps">
       <li>Create a <a href="https://my.lunchmoney.app/developers" target="_blank" rel="noopener">Lunch&nbsp;Money API token</a> (required).</li>
-      <li>Optionally create an <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">OpenRouter key</a> for AI suggestions — use a dedicated key with a spend limit.</li>
+      <li>Optionally create an <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">OpenRouter key</a> — use a dedicated key with a spend limit. Without one you get a shared free model with a daily quota and no web checks.</li>
     </ol>
     <p class="onboard-offline">You'll need to be online this first time — after that, dopo keeps
       working offline and syncs your sorting when you're back.</p>

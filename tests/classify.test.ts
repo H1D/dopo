@@ -249,3 +249,80 @@ describe("extractJson", () => {
     expect(extractJson("no json here")).toBe("no json here");
   });
 });
+
+describe("ORError — quota signals", () => {
+  test("429 is rateLimited + quotaExhausted; per-day wording flags dailyQuota", () => {
+    const perMin = new ORError(429, 'OpenRouter 429: {"error":{"message":"Rate limit exceeded: free-models-per-min"}}');
+    expect(perMin.rateLimited).toBe(true);
+    expect(perMin.quotaExhausted).toBe(true);
+    expect(perMin.dailyQuota).toBe(false);
+    const perDay = new ORError(429, 'OpenRouter 429: {"error":{"message":"Rate limit exceeded: free-models-per-day"}}');
+    expect(perDay.dailyQuota).toBe(true);
+  });
+  test("402 (no credit / $0 guardrail) is quotaExhausted but not rateLimited", () => {
+    const e = new ORError(402, "OpenRouter 402: insufficient credits");
+    expect(e.quotaExhausted).toBe(true);
+    expect(e.rateLimited).toBe(false);
+    expect(e.dailyQuota).toBe(false);
+    expect(e.tokenInvalid).toBe(false);
+  });
+});
+
+describe("classifyBatch — free-tier options and partial absorb", () => {
+  test("opts.model and opts.concurrency override the paid defaults", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    mock = new MockFetch()
+      .route(async (url, init) => {
+        if (!url.includes("/chat/completions")) return null;
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return pass1Response(JSON.parse(init!.body as string));
+      })
+      .install();
+    const txns = Array.from({ length: 3 * BATCH_SIZE }, (_, i) => txn(i + 1));
+    const out = await classifyBatch("free-key", CATS, txns, undefined, { model: "z-ai/glm-5.2:free", concurrency: 1 });
+    expect(out.length).toBe(3 * BATCH_SIZE);
+    expect(maxInFlight).toBe(1);
+    for (const c of mock.callsTo("/chat/completions")) {
+      expect((c.body as Record<string, unknown>).model).toBe("z-ai/glm-5.2:free");
+      expect(c.headers.Authorization).toBe("Bearer free-key");
+    }
+  });
+
+  test("a 429 mid-group keeps the sibling chunks that succeeded, then rethrows", async () => {
+    let n = 0;
+    mock = new MockFetch()
+      .route((url, init) => {
+        if (!url.includes("/chat/completions")) return null;
+        n++;
+        // second request of the first group is rate-limited; the rest succeed
+        return n === 2 ? json({ error: { message: "Rate limit exceeded: free-models-per-day" } }, 429)
+          : pass1Response(JSON.parse(init!.body as string));
+      })
+      .install();
+    const groups: unknown[][] = [];
+    const txns = Array.from({ length: 3 * BATCH_SIZE }, (_, i) => txn(i + 1)); // one group of 3 chunks
+    const err = await classifyBatch("k", CATS, txns, (g) => groups.push(g)).catch((e) => e);
+    expect(err).toBeInstanceOf(ORError);
+    expect(err.status).toBe(429);
+    expect(err.dailyQuota).toBe(true);
+    // 2 of 3 chunks were absorbed before the error surfaced — nothing paid for is dropped
+    expect(groups.length).toBe(1);
+    expect(groups[0]!.length).toBe(2 * BATCH_SIZE);
+    // and no further group was started after the failing one
+    expect(mock.callsTo("/chat/completions").length).toBe(3);
+  });
+});
+
+describe("classifyTransactions — passes free-tier opts through", () => {
+  test("model override reaches the request body", async () => {
+    mock = new MockFetch()
+      .route((url, init) => (url.includes("/chat/completions") ? pass1Response(JSON.parse(init!.body as string)) : null))
+      .install();
+    await classifyTransactions("k", [{ id: 1, merchant: "M", payee: "M", amount: "1.00", currency: "eur", date: "2026-01-01", notes: null }], CATS, { model: "openrouter/free" });
+    expect((mock.callsTo("/chat/completions")[0]!.body as Record<string, unknown>).model).toBe("openrouter/free");
+  });
+});

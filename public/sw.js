@@ -41,6 +41,7 @@ const PRECACHE = [
   "lib/card.js",
   "lib/lm.js",
   "lib/classify.js",
+  "lib/freekey.js",
   "lib/rules.js",
   "lib/clean.js",
   "lib/dust.js",

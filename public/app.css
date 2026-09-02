@@ -1207,3 +1207,20 @@ body.quaking > .actions {
   text-align: center;
 }
 .stuck-banner:active { transform: scale(.97); }
+
+/* free-tier quota surface: "Free AI quota used up — tap to add your own key" */
+.upgrade-banner {
+  display: block;
+  margin: 6px auto 0;
+  width: fit-content;
+  max-width: 92vw;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 999px;
+  padding: 6px 14px;
+  text-align: center;
+}
+.upgrade-banner:active { transform: scale(.97); }

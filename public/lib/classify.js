@@ -27,7 +27,36 @@ export class ORError extends Error {
   get tokenInvalid() {
     return this.status === 401;
   }
+  /** 429: OpenRouter's request cap (per-minute or per-day on free models). @returns {boolean} */
+  get rateLimited() {
+    return this.status === 429;
+  }
+  /**
+   * The account behind the key can't serve more requests right now: rate cap
+   * (429) or no credit (402 — what a $0-budget guardrail returns). On the shared
+   * free key both mean "quota", and the fix is the same: the user's own key.
+   * @returns {boolean}
+   */
+  get quotaExhausted() {
+    return this.status === 429 || this.status === 402;
+  }
+  /**
+   * OpenRouter names the bucket in the 429 body ("free-models-per-day" vs
+   * "...-per-min"). Best effort — unknown wording reads as the short kind.
+   * @returns {boolean}
+   */
+  get dailyQuota() {
+    return this.status === 429 && /per[-_ ]?day|daily/i.test(this.message);
+  }
 }
+
+/**
+ * Tunables for a pass-1 run. Defaults are the paid tier; the shared free key
+ * passes its own model and a lower concurrency (see lib/freekey.js).
+ * @typedef {object} ClassifyOpts
+ * @property {string} [model]
+ * @property {number} [concurrency]
+ */
 
 /**
  * @typedef {object} CategoryOption
@@ -134,7 +163,7 @@ async function complete(apiKey, model, prompt) {
       response_format: { type: "json_object" },
       temperature: 0.1,
       max_tokens: 6000,
-      // GLM-5.3-flash cannot disable reasoning; low effort keeps latency sane
+      // GLM cannot disable reasoning; low effort keeps latency sane
       reasoning: { effort: "low" },
     }),
   });
@@ -155,28 +184,37 @@ function categoryList(categories) {
 }
 
 /**
- * Pass 1 core loop: batches of 8, at most 3 requests in flight.
+ * Pass 1 core loop: batches of 8, at most `concurrency` (default 3) requests in flight.
  * `onGroup` (optional) receives each completed concurrency group's suggestions,
- * so the UI can absorb results while later batches are still cooking.
+ * so the UI can absorb results while later batches are still cooking. A failed
+ * chunk does not discard its siblings: whatever else in the group succeeded is
+ * still reported through `onGroup` before the first error is rethrown — on the
+ * shared free key a mid-pass 429 is routine, and a paid-for or quota-costing
+ * answer must not be thrown away.
  * @param {string} apiKey
  * @param {CategoryOption[]} categories
  * @param {TxnForLLM[]} txns
  * @param {(batch: Suggestion[]) => void} [onGroup]
+ * @param {ClassifyOpts} [opts]
  * @returns {Promise<Suggestion[]>}
  */
-export async function classifyBatch(apiKey, categories, txns, onGroup) {
+export async function classifyBatch(apiKey, categories, txns, onGroup, opts = {}) {
+  const model = opts.model ?? MODEL;
+  const concurrency = Math.max(1, opts.concurrency ?? CONCURRENCY);
   /** @type {TxnForLLM[][]} */
   const chunks = [];
   for (let i = 0; i < txns.length; i += BATCH_SIZE) chunks.push(txns.slice(i, i + BATCH_SIZE));
   /** @type {Suggestion[]} */
   const out = [];
-  for (let i = 0; i < chunks.length; i += CONCURRENCY) {
-    const results = await Promise.all(
-      chunks.slice(i, i + CONCURRENCY).map((chunk) => classifyChunk(apiKey, categories, chunk)),
+  for (let i = 0; i < chunks.length; i += concurrency) {
+    const settled = await Promise.allSettled(
+      chunks.slice(i, i + concurrency).map((chunk) => classifyChunk(apiKey, model, categories, chunk)),
     );
-    const flat = results.flat();
+    const flat = settled.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
     out.push(...flat);
-    if (onGroup) onGroup(flat);
+    if (onGroup && flat.length) onGroup(flat);
+    const failed = settled.find((r) => r.status === "rejected");
+    if (failed && failed.status === "rejected") throw failed.reason;
   }
   return out;
 }
@@ -205,12 +243,13 @@ function toAppSuggestion(s) {
 
 /**
  * App-facing pass 1: takes UI transaction objects (cleaned merchant attached),
- * classifies them in batches of 8 / concurrency 3, and reports each finished
- * group through `opts.onBatch` so cards warm up incrementally.
+ * classifies them in batches of 8 / concurrency 3 (or `opts.model` /
+ * `opts.concurrency`), and reports each finished group through `opts.onBatch`
+ * so cards warm up incrementally.
  * @param {string} apiKey
  * @param {TxnLike[]} txns
  * @param {CategoryOption[]} categories
- * @param {{onBatch?: (results: AppSuggestion[]) => void}} [opts]
+ * @param {ClassifyOpts & {onBatch?: (results: AppSuggestion[]) => void}} [opts]
  * @returns {Promise<AppSuggestion[]>}
  */
 export async function classifyTransactions(apiKey, txns, categories, opts = {}) {
@@ -220,17 +259,19 @@ export async function classifyTransactions(apiKey, txns, categories, opts = {}) 
     categories,
     txns.map(txnForLLM),
     onBatch ? (batch) => onBatch(batch.map(toAppSuggestion)) : undefined,
+    { model: opts.model, concurrency: opts.concurrency },
   );
   return all.map(toAppSuggestion);
 }
 
 /**
  * @param {string} apiKey
+ * @param {string} model
  * @param {CategoryOption[]} categories
  * @param {TxnForLLM[]} txns
  * @returns {Promise<Suggestion[]>}
  */
-async function classifyChunk(apiKey, categories, txns) {
+async function classifyChunk(apiKey, model, categories, txns) {
   const prompt = `You categorize personal bank transactions for a household in the Netherlands (bank: ABN AMRO, currency mostly EUR). Payee strings are often noisy: payment service providers (Mollie, Zettle, SumUp, CCV), IBANs, dossier numbers. The "merchant" field is a cleaned-up guess; "raw_payee" is the original string; "lookup" is a web search snippet about the merchant when available. Positive amounts are money going out (expenses), negative amounts are money coming in.
 
 Categories (id: group / name):
@@ -242,7 +283,7 @@ ${JSON.stringify(txns, null, 1)}
 For EVERY transaction return the best category. Use null for category_id only if you genuinely cannot tell. In "merchant", copy that transaction's merchant field EXACTLY — it ties your answer to the right row. Respond with ONLY a JSON object of this exact shape:
 {"suggestions": [{"id": <txn id>, "merchant": "<exact copy of that transaction's merchant field>", "category_id": <category id or null>, "confidence": <0..1>, "reasoning": "<one short sentence>"}]}`;
 
-  const content = await complete(apiKey, MODEL, prompt);
+  const content = await complete(apiKey, model, prompt);
   /** @type {{suggestions?: Suggestion[]}} */
   let parsed;
   try {

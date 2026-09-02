@@ -17,7 +17,12 @@ dopo.artems.net (assets-only Worker; works equally behind an auth proxy). ES mod
     - PUT body preserves the exact shape `{id, category_id, status: "reviewed"}` (fixture-tested).
   - Structured `LMError` with `.status`; 401 → distinct token-invalid signal.
 - `lib/classify.js` — OpenRouter client.
-  - Pass 1: batches of 8, concurrency 3, `reasoning: {effort:"low"}`, model `z-ai/glm-5.3-flash`.
+  - Pass 1: batches of 8, concurrency 3, `reasoning: {effort:"low"}`, model `z-ai/glm-5.3-flash`
+    (both overridable per call via `{model, concurrency}` — the free tier passes its own). A failed
+    chunk never discards its siblings: the group runs `allSettled`, fulfilled chunks are reported
+    through `onGroup`, then the first rejection is rethrown.
+  - `ORError` getters: `tokenInvalid` (401), `rateLimited` (429), `quotaExhausted` (429|402),
+    `dailyQuota` (429 whose body names a per-day bucket — best effort).
   - Pass 2: `webCheckMerchant(key, merchant, categories)` — model `z-ai/glm-5.3-flash:online`, ONE call
     per unique `cleanMerchant()` value, returns category+confidence+reasoning+`web:true`.
   - Headers: `"HTTP-Referer": location.origin` (the custom OpenRouter attribution header — NOT the
@@ -49,9 +54,43 @@ dopo.artems.net (assets-only Worker; works equally behind an auth proxy). ES mod
   merchant. Auto-cap 15 unique merchants per session; beyond that an explicit button
   "Web-check N more merchants (~$0.NN)". Results cached per merchant (IndexedDB) — cost is at most
   once per merchant while the cache persists (iOS may evict after 7 days of non-use; hedge wording).
-- LM-ONLY MODE: with no OpenRouter key the app fully works (rules + manual picking); classify surfaces
-  "add an OpenRouter key in Settings to enable AI suggestions". Settings validates each token live
-  (LM /v2/me, OR /api/v1/key), independently; either may be absent.
+- LM-ONLY MODE: with no OpenRouter key AND no shared free key the app fully works (rules + manual
+  picking); classify surfaces "add an OpenRouter key in Settings to enable AI suggestions". Settings
+  validates each token live (LM /v2/me, OR /api/v1/key), independently; either may be absent.
+
+## Shared free tier (owner-approved, added post-v1)
+
+- `lib/freekey.js` exports `FREE_KEY` (stamped at deploy from the `DOPO_FREE_KEY` env var by
+  `scripts/stamp-sw.ts` — the `__DOPO_FREE_KEY__` placeholder reads as empty when served raw or
+  stamped without the var = no shared tier; the reference instance holds it in a repository secret
+  and the key value is folded into the SW version hash so a rotation re-busts the cache; GitHub push
+  protection refuses the literal, which is the point), `FREE_MODELS` (ordered `:free` variants that support `response_format`; every free model
+  has ONE upstream provider, so app.js walks the list on 429/404 — sticky once one answers, wraps
+  back to the first after a cooldown) and `FREE_CONCURRENCY` (1). The key is public by
+  construction, so it MUST live under an OpenRouter guardrail: allowlist exactly the `FREE_MODELS`
+  entries, $0 budget (verified 2026-09-03: a paid model answers 404 "Model blocked by guardrail").
+  Bounded to quota, never money. `tests/freekey.test.ts` pins the invariants (`:free` suffix, unique
+  entries, concurrency 1, key shape); `tests/stamp-sw.test.ts` covers the stamp (empty env → empty
+  key, key never in the source tree, key changes the version, malformed key fails).
+- `app.js orCreds()`: the user's own key wins; else the free key; else LM-only. Pass 2 (web checks)
+  reads `tokens.or` directly and NEVER runs on the free key (the `:online` variant costs money and
+  would 402 against the $0 budget anyway).
+- Quota (429/402) or 404 on the free key with every model in `FREE_MODELS` refusing: absorbed
+  batches stay on the cards; `onFreeQuota` backs off
+  (90 s doubling, capped at 15 min; a per-day bucket jumps straight to the cap — it only clears at
+  midnight UTC), re-arms `ensureClassified` for when the cooldown ends, and shows the tappable
+  **upgrade banner** (`#upgradeBanner`, opens Settings) with per-day vs rate-limited copy. The banner
+  stays for the session until the user saves their own key. Any complete free pass resets the
+  backoff step. OpenRouter free limits are per ACCOUNT (20/min; 50/day, 1000/day once the account
+  has ever bought $10), shared by every dopo user on the key — hence concurrency 1 and the banner.
+- 401 on the free key (revoked/rotated) flips `freeTierDead`: silent LM-only mode, no Settings nag
+  (the nag is for the user's own dead key). 402 on the user's OWN key is noted once per session
+  ("out of credit") instead of the generic retry note.
+- Surfaces: the OR field hint reads "Using the shared free key — …" when no own key is set; the
+  field sub-text and the onboarding card disclose the trade (smaller model, shared daily quota, no
+  web checks, free models may train on prompts); the web bar's free-tier hint mentions web checks
+  only when an unsure card would get one, and never on top of the upgrade banner; the Settings
+  web-check line says pass 2 needs your own key.
 
 ## Apply queue semantics (client is now the only trust boundary)
 
@@ -114,7 +153,7 @@ source of truth for transaction data; the device is the source of truth for pend
 
 ## Settings / onboarding
 
-- Settings: two password fields (LM required, OR optional), live validation per field, budget name
+- Settings: two password fields (LM required, OR optional — the shared free tier fills in), live validation per field, budget name
   display, **"Forget tokens on this device"** button (clears tokens only), web-check session counter,
   **deck cutoff** chips, **local rules** list.
 - **Deck cutoff** (`dopo.cutoff.v1`, presets `1w`/`1m`/`3m`/`ytd`, default `ytd` = the pre-cutoff
@@ -173,7 +212,8 @@ source of truth for transaction data; the device is the source of truth for pend
 ## Deploy & versioning
 
 - `scripts/stamp-sw.ts` (bun): copies public/ to dist/, replaces `__DOPO_VERSION__` with a content hash
-  of the public files, FAILS if the placeholder is missing/left. BOTH deploys use it:
+  of the public files (+ the free key), and `__DOPO_FREE_KEY__` with `$DOPO_FREE_KEY`; FAILS if a
+  placeholder is missing/left or the key is malformed. BOTH deploys use it:
   Pages workflow uploads dist/; Cloudflare deploy = `bun scripts/stamp-sw.ts && wrangler deploy` (wrangler
   assets dir pointed at dist/). CI checks the sw.js precache list matches the actual files in public/.
 - Self-host section documents the stamp script; serving public/ raw works but SW cache-busting

@@ -3,7 +3,7 @@
 Swipe your [Lunch Money](https://lunchmoney.app) transactions into categories. A static PWA with a
 mobile-first, game-like review UI: one card at a time, swipe right to accept the model's suggestion,
 left to park, tap to override. GLM-5.3-flash (via OpenRouter, bring your own key) does the guessing;
-you stay the judge.
+you stay the judge. No key yet? A shared free tier gets you started (see [What it costs](#what-it-costs)).
 
 **Use it now: [dopo.artems.net](https://dopo.artems.net)** — no signup; paste your two tokens and swipe.
 
@@ -15,6 +15,13 @@ directly to `api.lunchmoney.dev` and `openrouter.ai` — nowhere else.
 
 - Your tokens go browser → Lunch Money / OpenRouter directly. They are **never sent to the host**
   serving this page, because there is nothing there to send them to — it's a static file server.
+- **The shared free tier is the one exception to "no operator".** Until you paste your own OpenRouter
+  key, pass 1 runs on a key baked into the served app at deploy time (`public/lib/freekey.js`) under
+  the maintainer's OpenRouter account. Your browser still talks to `openrouter.ai` directly — nothing passes through
+  the host — but that account's activity log sees the usual request metadata (model, token counts,
+  timestamps), and OpenRouter's free endpoints may log or train on prompts, which for pass 1 means
+  payee strings, amounts, dates and notes of your uncategorized transactions. Your own key ends
+  that: you pick the data policy, nobody else sees the usage.
 - The host still sees ordinary web metadata (your IP, user agent, when you loaded the page). That is
   true of any website.
 - You are trusting the JavaScript being served to you. Mitigations: the code is open source with
@@ -31,6 +38,11 @@ directly to `api.lunchmoney.dev` and `openrouter.ai` — nowhere else.
   Treat it like a bank password: only paste it into origins you trust, and revoke it when in doubt.
 - **Use a dedicated OpenRouter key with a spend limit.** Create a separate key just for dopo and cap
   it (a few dollars covers months of use). Worst case is bounded.
+- **The baked-in free key is public on purpose.** Anyone can read it out of the JavaScript, so it is
+  created under an OpenRouter guardrail that allowlists only `:free` models and caps spend at $0.
+  A scraped key can burn the shared daily quota (you'd see the upgrade banner sooner) but never
+  money, and never anything of yours. It is not in this repository: the deploy job injects it from
+  a repository secret, so rotating it is a secret update, not a commit.
 - **Browser extensions can read page storage.** A CSP protects against injected third-party content,
   but it does not bind extensions you install — an extension with page access can read your tokens
   on any site, including this one. Don't run extensions you don't trust on the browser profile that
@@ -46,6 +58,15 @@ directly to `api.lunchmoney.dev` and `openrouter.ai` — nowhere else.
 
 You pay OpenRouter directly; dopo adds no margin because dopo has no operator.
 
+**Free tier (no key pasted):** pass 1 runs on a smaller free model (`nvidia/nemotron-3-super-120b-a12b:free`,
+with a few other free models as fallbacks when its provider is saturated) through a shared key,
+one request at a time. OpenRouter's free-model quota is per account, so it is shared by
+everyone using dopo without a key: 20 requests a minute and 1,000 a day across all of them. When it
+runs dry, whatever was already classified stays on the cards, the rest waits, and a banner offers
+the fix — your own key. No web checks on the free tier (they cost real money).
+
+**Your own key:**
+
 | Step | When it runs | Cost |
 | --- | --- | --- |
 | Pass 1 — batch classification | every unsuggested transaction, batches of 8 | ~$0.06 per 500 transactions |
@@ -54,8 +75,7 @@ You pay OpenRouter directly; dopo adds no margin because dopo has no operator.
 Sorting less costs less: **Settings → Sort from** sets how far back dopo fetches (last week, last
 month, last 3 months, or this year — the default), so pass 1 only classifies what's in range.
 
-No OpenRouter key? The app still fully works with local rules + manual picking; you just get no AI
-suggestions. A rule is made from the undo toast right after you sort a card ("Always: *merchant* →
+Rules are free and yours: a rule is made from the undo toast right after you sort a card ("Always: *merchant* →
 *category*") and matches instantly and offline forever after; review or delete them under
 **Settings → Local rules**.
 
@@ -101,6 +121,13 @@ bun scripts/stamp-sw.ts   # copies public/ -> dist/, stamps the SW version
 
 Serving `public/` raw works too, but the service worker version placeholder is only replaced by the
 stamp script — without it, updates won't invalidate the offline cache. Use `dist/`.
+
+The shared free tier is opt-in for self-hosters: without `DOPO_FREE_KEY` in the environment the
+stamp writes an empty key, which means "no shared tier, users bring their own key" (the app still
+works as rules + manual picking meanwhile). To offer one, create an OpenRouter key under a guardrail
+that allowlists exactly the `FREE_MODELS` entries in `public/lib/freekey.js` with a $0 budget, and
+run `DOPO_FREE_KEY=sk-or-v1-… bun scripts/stamp-sw.ts`. The reference instance keeps it in the
+`DOPO_FREE_KEY` repository secret.
 
 `bun test && bun scripts/ci-checks.ts` runs the same gates as CI (XSS property tests, CSP/inline
 checks, external-URL allowlist, SW precache drift).
