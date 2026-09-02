@@ -28,8 +28,11 @@ music host and from `music/manifest.json`, after which no client can fetch it
 
 ## Known playback limitations
 
-- iPhone: the ring/silent hardware switch mutes Web Audio entirely — set it
-  to ring to hear anything.
+- Music plays as regular media (a MediaStream-fed audio element with Media
+  Session metadata): OS media controls — lock screen, headphone buttons,
+  media keys — pause, resume and skip it, and the iPhone ring/silent switch
+  does not mute it. Sound effects are plain Web Audio: on iPhone the silent
+  switch mutes them whenever music isn't also playing.
 - Safari (non-installed, tab usage): storage eviction can purge cached tracks
   after ~7 days of not visiting; installed-PWA usage is unaffected.
 

@@ -23,25 +23,55 @@ export const SFX_VOL = 0.7;
  * @property {AudioContext} ctx
  * @property {GainNode} music  BGM plugs its player gain in here
  * @property {GainNode} sfx    all effects mix through here
+ * @property {HTMLAudioElement|null} mediaEl  the music sink — a hidden media
+ *   element fed by a MediaStream, so the OS owns a real pause handle for the
+ *   music (lock screen, headphone buttons, call interruptions). null when the
+ *   stream route failed; music then plays via ctx.destination like SFX.
  */
 
-/** @returns {AudioBus} */
-export function createAudioBus() {
-  const ctx = new AudioContext();
+/** @param {AudioContext} ctx @returns {DynamicsCompressorNode} */
+function makeLimiter(ctx) {
   const limiter = ctx.createDynamicsCompressor();
   limiter.threshold.value = -4;
   limiter.knee.value = 0;
   limiter.ratio.value = 20;
   limiter.attack.value = 0.002;
   limiter.release.value = 0.25;
-  limiter.connect(ctx.destination);
-  const music = ctx.createGain();
-  music.gain.value = MUSIC_VOL;
-  music.connect(limiter);
+  return limiter;
+}
+
+/** @returns {AudioBus} */
+export function createAudioBus() {
+  const ctx = new AudioContext();
+  // Two sinks on purpose. SFX go straight to the context destination — they
+  // are UI feedback, not "media", and must not summon OS media controls or
+  // die with them. Music goes through a MediaStream-fed <audio> element:
+  // that element is what OS pause signals act on, what the lock screen
+  // shows (with Media Session metadata from lib/music.js), and — as media
+  // playback — what the iPhone silent switch does NOT mute. srcObject is a
+  // live stream, not a fetched URL, so no media-src CSP entry is needed.
   const sfx = ctx.createGain();
   sfx.gain.value = SFX_VOL;
-  sfx.connect(limiter);
-  return { ctx, music, sfx };
+  const sfxLimiter = makeLimiter(ctx);
+  sfx.connect(sfxLimiter);
+  sfxLimiter.connect(ctx.destination);
+
+  const music = ctx.createGain();
+  music.gain.value = MUSIC_VOL;
+  const musicLimiter = makeLimiter(ctx);
+  music.connect(musicLimiter);
+  /** @type {HTMLAudioElement|null} */
+  let mediaEl = null;
+  try {
+    const sink = ctx.createMediaStreamDestination();
+    const el = new Audio();
+    el.srcObject = sink.stream;
+    musicLimiter.connect(sink);
+    mediaEl = el; // kept referenced here; never in the DOM
+  } catch {
+    musicLimiter.connect(ctx.destination); // additive only: music still plays
+  }
+  return { ctx, music, sfx, mediaEl };
 }
 
 /** Exponential ramps can't reach 0 — this is "silence" for envelope tails. */
