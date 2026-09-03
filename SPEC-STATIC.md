@@ -87,8 +87,8 @@ dopo.artems.net (assets-only Worker; works equally behind an auth proxy). ES mod
   (the nag is for the user's own dead key). 402 on the user's OWN key is noted once per session
   ("out of credit") instead of the generic retry note.
 - Surfaces: the OR field hint reads "Using the shared free key — …" when no own key is set; the
-  field sub-text and the onboarding card disclose the trade (smaller model, shared daily quota, no
-  web checks, free models may train on prompts); the web bar's free-tier hint mentions web checks
+  field sub-text and the onboarding wizard's `free` card disclose the trade (smaller model, shared
+  daily quota, no web checks, free models may train on prompts); the web bar's free-tier hint mentions web checks
   only when an unsure card would get one, and never on top of the upgrade banner; the Settings
   web-check line says pass 2 needs your own key.
 
@@ -169,8 +169,27 @@ source of truth for transaction data; the device is the source of truth for pend
   day/month order follows the reader's own region. Bare `YYYY-MM-DD` is parsed as a LOCAL calendar
   day (`new Date("…")` is UTC midnight = the previous day west of Greenwich); the year is added only
   when it isn't the current one, and a time only when the source actually carries one.
-- Onboarding card for missing LM token: link to the LM developers page and OR keys page with
-  one-line instructions; recommends a dedicated OR key with a spend limit.
+- **Onboarding wizard** (`#onboard`, a `<dialog>` in the top layer; replaces the old onboarding
+  card): 4 steps — welcome (what dopo does, the privacy line, an offline note) → lm (paste the LM
+  token, live-validated) → or (a real radio group: `free` when a shared key is configured, else
+  `none`; `own` reveals a key field) → done (gesture legend, live uncategorized count, cutoff
+  chips). Shown iff `!tokens.lm || cursor`; resumes at the persisted step, never at `welcome` once a
+  token exists. Returning users (Forget tokens) skip to `["lm","or"]` when a shared free tier
+  exists, else `["lm"]` alone — never silently defaulting a returning own-key user onto the shared
+  key. The last step's primary button reads "Done" on the returning path, "Start sorting" on a
+  first run.
+  - **Resume cursor** `dopo.onboard.v1` holds the current step id, written on every step change and
+    removed on finish or Forget tokens. Invariant: the wizard is showing iff `!tokens.lm || cursor`.
+  - **Containment**: while the wizard is open (`onboardingActive`) it owns the top layer alone —
+    Settings and other sheets cannot open over it, and the periodic refresh, visibility handlers,
+    online resync, and `ensureClassified` all stand down until it closes. Token errors route into
+    the wizard's own fields (`obGoto(step, {dead:true})`) instead of Settings.
+  - Deck loading starts quietly once the `or` step commits (`loadDeckQuiet()` — no dealing,
+    animation, or classification), so the done step's count is usually already populated by the
+    time the user reaches it; dealing and classifying only happen once, at `obFinish()`.
+  - History mirrors the sheet machinery: opening the wizard pushes one history entry; Back inside
+    the wizard consumes it and steps backward (re-pushing to stay balanced); Back on the first step
+    leaves the wizard open and falls through to leaving the PWA, same as any other sheet.
 
 ## CSP & XSS
 

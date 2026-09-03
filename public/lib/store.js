@@ -9,6 +9,7 @@
  *   - Later pile POINTERS  dopo.later.v1   (ids; legacy full-txn entries still accepted)
  *   - rules                dopo.rules.v1
  *   - deck cutoff preset   dopo.cutoff.v1
+ *   - onboarding cursor    dopo.onboard.v1 (wizard step id; cleared with the tokens)
  *
  * IndexedDB (bulk, async): suggestion cache + Later txn bodies (~2000-entry LRU,
  * per-entry writes) + the offline state snapshot. Falls back to in-memory Maps
@@ -22,6 +23,7 @@
 
 import { isRule } from "./rules.js";
 import { CUTOFF_PRESETS, DEFAULT_CUTOFF, cutoffRange } from "./lm.js";
+import { parseStep } from "./onboard.js";
 
 export const LS_KEYS = {
   tokens: "dopo.tokens.v1",
@@ -31,6 +33,7 @@ export const LS_KEYS = {
   cutoff: "dopo.cutoff.v1",
   audio: "dopo.audio.v1",
   music: "dopo.music.v1",
+  onboard: "dopo.onboard.v1",
 };
 
 // ---------------------------------------------------------------------------
@@ -104,9 +107,12 @@ export function setTokens(partial) {
   });
 }
 
-/** "Forget tokens on this device" — clears tokens ONLY; queue/rules/caches stay. */
+/** "Forget tokens on this device" — clears tokens ONLY; queue/rules/caches stay.
+ *  The onboarding cursor goes with them: without tokens the wizard restarts from
+ *  its returning path, and a stale "done" cursor would resume past the token step. */
 export function clearTokens() {
   lsRemove(LS_KEYS.tokens);
+  lsRemove(LS_KEYS.onboard);
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +319,31 @@ export function cutoffLoad() {
  */
 export function cutoffSave(id) {
   lsSet(LS_KEYS.cutoff, CUTOFF_PRESETS.some((p) => p.id === id) ? id : DEFAULT_CUTOFF);
+}
+
+// ---------------------------------------------------------------------------
+// onboarding cursor — which wizard step to resume at (app.js decides whether
+// the wizard shows at all: `!tokens.lm || cursor`)
+// ---------------------------------------------------------------------------
+
+/** @returns {import("./onboard.js").StepId|null}  unknown / corrupted → null (no resume) */
+export function onboardCursorLoad() {
+  return parseStep(lsGet(LS_KEYS.onboard));
+}
+
+/**
+ * @param {string} id  an unknown step id CLEARS the cursor instead of persisting
+ *   garbage — resuming nowhere beats resuming at a step that no longer exists
+ * @throws on storage failure
+ */
+export function onboardCursorSave(id) {
+  const step = parseStep(id);
+  if (step === null) { lsRemove(LS_KEYS.onboard); return; }
+  lsSet(LS_KEYS.onboard, step);
+}
+
+export function onboardCursorClear() {
+  lsRemove(LS_KEYS.onboard);
 }
 
 // ---------------------------------------------------------------------------

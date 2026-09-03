@@ -22,6 +22,8 @@
 //   8. package.json has no "dependencies" key (zero runtime deps).
 //   9. public/vendor/** matches vendor.lock sha256s exactly (gates 3/4 don't
 //      scan vendor code; the hash pin replaces them).
+//  10. DOM lookup literals: every `$el|$btn|$input|$canvas|$dialog("#id")` in
+//      public/app.js has a matching `id="id"` in public/index.html.
 //
 // Gates 3 + 4 skip public/vendor/** (see isVendored); gate 9 is their
 // replacement for that subtree.
@@ -277,6 +279,25 @@ if ("dependencies" in pkg) {
     listed.delete(rel);
   }
   for (const rel of listed) fail(`vendor.lock pins "${rel}" but the file does not exist`);
+}
+
+// ---- 10: DOM lookup literals resolve to a real id ---------------------------
+// $el/$btn/$input/$canvas/$dialog("#id") is app.js's only way to reach the
+// DOM. A typo'd or renamed id fails silently at runtime (querySelector
+// returns null and the crash shows up somewhere unrelated) — catch it at
+// build time instead by cross-checking every literal against index.html.
+{
+  const appJs = read("app.js");
+  const wanted = new Set<string>();
+  for (const m of appJs.matchAll(/\$(?:el|btn|input|canvas|dialog)\(\s*(["'])#([\w-]+)\1/g)) {
+    if (m[2]) wanted.add(m[2]);
+  }
+  const html = read("index.html");
+  const present = new Set([...html.matchAll(/\bid="([\w-]+)"/g)].map((m) => m[1] ?? ""));
+  const missing = [...wanted].filter((id) => !present.has(id)).sort();
+  if (missing.length) {
+    fail(`public/app.js references id(s) missing from public/index.html: ${missing.join(", ")}`);
+  }
 }
 
 // ----------------------------------------------------------------------------
