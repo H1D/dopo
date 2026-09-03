@@ -5,8 +5,8 @@
  * `dopo.onboard.v1` cursor persistence, and index.html (owner B) owns the ids.
  */
 
-/** @typedef {"welcome"|"lm"|"or"|"done"} StepId */
-export const STEP_IDS = /** @type {const} */ (["welcome", "lm", "or", "done"]);
+/** @typedef {"welcome"|"lm"|"or"|"tune"|"done"} StepId */
+export const STEP_IDS = /** @type {const} */ (["welcome", "lm", "or", "tune", "done"]);
 
 /**
  * @param {unknown} v
@@ -19,7 +19,7 @@ export function parseStep(v) {
 }
 
 /**
- * The step sequence for a session. First-run is always all four steps; the
+ * The step sequence for a session. First-run is always all five steps; the
  * returning path (Forget tokens) skips straight to re-entering credentials —
  * `or` only reappears when a shared free tier exists, because the user may
  * have had their own key before and must not be silently defaulted onto the
@@ -29,7 +29,7 @@ export function parseStep(v) {
  */
 export function stepsFor(o) {
   if (o.returning) return o.hasFreeTier ? ["lm", "or"] : ["lm"];
-  return ["welcome", "lm", "or", "done"];
+  return ["welcome", "lm", "or", "tune", "done"];
 }
 
 /**
@@ -140,7 +140,8 @@ export function canAdvance(a) {
     return { canContinue: true, primary: "Connect Lunch Money", secondary: null, showBack, checkFirst: false };
   }
 
-  if (stepId === "done") {
+  if (stepId === "tune" || stepId === "done") {
+    // tune: period + sound, all optional with sane defaults; done: the gesture legend.
     return { canContinue: true, primary, secondary: null, showBack, checkFirst: false };
   }
 
@@ -171,7 +172,18 @@ export function canAdvance(a) {
  */
 export function orChoices(hasFreeTier) {
   /** @type {{id:"free"|"none"|"own", title:string, lead:string, bullets:string[]}[]} */
-  const out = [];
+  const out = [
+    {
+      // first and recommended: the best model, web checks, and your own data policy
+      id: "own",
+      title: "My own OpenRouter key",
+      lead: "Best results — about 3 minutes to set up.",
+      bullets: [
+        "Sign up at openrouter.ai, add a few dollars of credit, and create a dedicated key with a spend limit — dopo shows the exact steps.",
+        "About $0.06 per 500 transactions, plus $0.0075 each time it double-checks a merchant on the web (max 15 per session).",
+      ],
+    },
+  ];
   if (hasFreeTier) {
     out.push({
       id: "free",
@@ -193,14 +205,5 @@ export function orChoices(hasFreeTier) {
       bullets: [],
     });
   }
-  out.push({
-    id: "own",
-    title: "My own key",
-    lead: "",
-    bullets: [
-      "About $0.06 per 500 transactions, plus $0.0075 each time it double-checks a merchant on the web (max 15 per session).",
-      "Use a dedicated key with a spend limit.",
-    ],
-  });
   return out;
 }

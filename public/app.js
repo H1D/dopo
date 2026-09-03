@@ -360,6 +360,7 @@ function main() {
     rulesNote: $el("#rulesNote"), rulesList: $el("#rulesList"),
     badgeToggle: $input("#badgeToggle"), settingsError: $el("#settingsError"), menuSettings: $btn("#menuSettings"),
     musicToggle: $input("#musicToggle"), sfxToggle: $input("#sfxToggle"),
+    obMusicToggle: $input("#obMusicToggle"), obSfxToggle: $input("#obSfxToggle"),
     musicChip: $btn("#musicChip"), musicPop: $el("#musicPop"),
     musicTitle: $el("#musicTitle"), musicAuthor: $el("#musicAuthor"),
     musicSkip: $btn("#musicSkip"), musicMute: $btn("#musicMute"), musicBan: $btn("#musicBan"),
@@ -367,7 +368,7 @@ function main() {
     obLmInput: $input("#obLmInput"), obLmShow: $btn("#obLmShow"), obLmHint: $el("#obLmHint"), obLmError: $el("#obLmError"),
     obAiGroup: $el("#obAiGroup"), obOrField: $el("#obOrField"),
     obOrInput: $input("#obOrInput"), obOrShow: $btn("#obOrShow"), obOrHint: $el("#obOrHint"), obOrError: $el("#obOrError"),
-    obCount: $el("#obCount"), obCutoffChange: $btn("#obCutoffChange"), obCutoffRow: $el("#obCutoffRow"), obCutoffLine: $el("#obCutoffLine"),
+    obCount: $el("#obCount"), obCutoffRow: $el("#obCutoffRow"),
     obNote: $el("#obNote"), obBack: $btn("#obBack"), obSecondary: $btn("#obSecondary"), obNext: $btn("#obNext"),
     webBar: $el("#webBar"), webBarBtn: $btn("#webBarBtn"),
     connChip: $el("#connChip"), staleBanner: $el("#staleBanner"), stuckBanner: $btn("#stuckBanner"),
@@ -764,7 +765,7 @@ function main() {
     try { await flush("online"); } catch { /* flush routes/backs off internally */ }
     if (onboardingActive) {
       pendingSheetResync = true; // re-armed when the wizard closes
-      if (obStep === "done" && loadState !== "live") void obLoad({}); // "loads when you reconnect"
+      if ((obStep === "tune" || obStep === "done") && loadState !== "live") void obLoad({}); // "loads when you reconnect"
       const w = obFieldOf();
       if (w && obField[w].status === "netfail" && obField[w].value) void obValidate(w); // "checks it when you reconnect"
       return;
@@ -1896,14 +1897,15 @@ function main() {
   }
 
   // ---------- settings: deck cutoff ----------
-  /** Chips + "from <date>" line; Settings and the wizard's done step share it.
+  /** Chips + optional "from <date>" line; Settings and the wizard's tune step share it.
    *  @param {HTMLElement} [container] @param {HTMLElement} [lineEl] */
-  function renderCutoffRow(container = els.cutoffRow, lineEl = els.cutoffLine) {
+  function renderCutoffRow(container = els.cutoffRow, /** @type {HTMLElement|null} */ lineEl = els.cutoffLine) {
     const btnHtml = (/** @type {{id: string, label: string}} */ p) =>
       `<button type="button" class="cutoff-chip${p.id === cutoff ? " on" : ""}"
         data-cutoff="${esc(p.id)}" aria-pressed="${p.id === cutoff ? "true" : "false"}">${esc(p.label)}</button>`;
     const chipsHtml = CUTOFF_PRESETS.map(btnHtml).join("");
     container.innerHTML = chipsHtml;
+    if (!lineEl) return; // the wizard's count line names the start date itself
     const { startDate } = fetchWindow();
     lineEl.textContent = `Showing transactions from ${fmtTxnDate(startDate)} onwards.`;
   }
@@ -2220,10 +2222,6 @@ function main() {
       obSetShown(which, false);
       obPaintField(which, null, null);
     }
-    els.obCutoffRow.hidden = true;
-    els.obCutoffLine.hidden = true;
-    els.obCutoffChange.hidden = true;
-    els.obCutoffChange.setAttribute("aria-expanded", "false");
     els.obNote.hidden = true;
     els.obNote.textContent = "";
     if (!opts.adoptHistory) {
@@ -2241,7 +2239,7 @@ function main() {
     const cursor = onboardCursorLoad();
     let start = cursor !== null && obSteps.includes(cursor) ? cursor : first;
     if (tokens.lm && start === "welcome") start = "lm";
-    if (!tokens.lm && (start === "or" || start === "done")) start = "lm";
+    if (!tokens.lm && start !== "welcome" && start !== "lm") start = "lm";
     return start;
   }
 
@@ -2266,7 +2264,15 @@ function main() {
     if (id === "or") renderAiChoices();
     obShowPanel(id);
     obRender();
-    if (id === "done") obRenderDone();
+    if (id === "tune") obRenderTune();
+    if (id === "done") {
+      // the sound toggles live here; paint the truth (a cursor resume must not show an
+      // unchecked box for music that is actually on), and keep the quiet preload the
+      // tune step would have kicked — a resume can land here directly
+      els.obMusicToggle.checked = audioPrefs.music;
+      els.obSfxToggle.checked = audioPrefs.sfx;
+      if (loadState !== "live" && !loadInFlight && !stateError) void obLoad({});
+    }
   }
 
   function obBack() {
@@ -2516,7 +2522,7 @@ function main() {
         if (!onTokensChanged({ or: null })) { note("Couldn't update the key — this device's storage may be full", 5000); return; }
       }
       const n = nextStep(obSteps, step);
-      if (step === "or" && n) void obLoad({}); // the done step wants the count; a last step loads via obFinish
+      if (step === "or" && n) void obLoad({}); // the tune step wants the count; a last step loads via obFinish
       if (n) obGoto(n); else void obFinish();
     } finally {
       obContinuing = false;
@@ -2532,7 +2538,7 @@ function main() {
     void obContinue();
   }
 
-  /** The AI step's Continue and the done step's own kick-off: replay the queue
+  /** The AI step's Continue and the tune step's own kick-off: replay the queue
    *  under the (possibly new) token, then fetch the deck quietly.
    *  @param {{force?: boolean}} opts */
   async function obLoad(opts) {
@@ -2542,7 +2548,7 @@ function main() {
   }
 
   /** Wizard-side deck fetch: state only — no deal, no animation, no classify; the
-   *  done step repaints its count line from the outcome. One in flight at a time,
+   *  tune step repaints its count line from the outcome. One in flight at a time,
    *  and a second live fetch only on `force` (cutoff change).
    *  @param {{force?: boolean}} [opts] @returns {Promise<void>} */
   function loadDeckQuiet(opts = {}) {
@@ -2567,31 +2573,29 @@ function main() {
       }
       // chip tapped mid-fetch — but not on a token that just bounced us back to the lm step
       if (cutoff !== loadedCutoff && onboardingActive && !obDead.lm) { await loadDeckQuiet({ force: true }); return; }
-      obRenderDone();
+      obRenderTune();
     };
     stateError = null;
     loadInFlightFor = tokens.lm;
     loadInFlight = run();
-    obRenderDone(); // "Loading your transactions…" — after the flag is set, so it doesn't re-kick itself
+    obRenderTune(); // "Loading your transactions…" — after the flag is set, so it doesn't re-kick itself
     return loadInFlight;
   }
 
-  /** Done step: live count line + cutoff chips. Starts the load itself when
+  /** Tune step: live count line + cutoff chips. Starts the load itself when
    *  nothing is loaded yet (cursor resume lands here directly). */
-  function obRenderDone() {
-    if (!onboardingActive || obStep !== "done") return;
-    renderCutoffRow(els.obCutoffRow, els.obCutoffLine);
+  function obRenderTune() {
+    if (!onboardingActive || obStep !== "tune") return;
+    renderCutoffRow(els.obCutoffRow, null);
     let msg;
     if (loadInFlight) msg = "Loading your transactions…";
     else if (loadState === "live" && !stateError) {
       const { startDate } = fetchWindow();
-      const preset = CUTOFF_PRESETS.find((p) => p.id === cutoff)?.label ?? cutoff;
-      msg = `${backlog.length} uncategorized since ${fmtTxnDate(startDate)} (${preset})`;
+      msg = `${backlog.length} uncategorized transaction${backlog.length === 1 ? "" : "s"} since ${fmtTxnDate(startDate)}`;
     } else if (connOffline()) msg = "You're offline — dopo loads your transactions when you reconnect.";
     else if (stateError) msg = "Couldn't load yet — dopo retries when you start.";
     else { msg = "Loading your transactions…"; void obLoad({}); }
     els.obCount.textContent = msg;
-    els.obCutoffChange.hidden = loadState !== "live"; // "Change" needs a window to change
   }
 
   /** Wizard cutoff chip: same persistence as Settings, but the refetch happens right
@@ -2600,9 +2604,9 @@ function main() {
     if (id === cutoff) return;
     cutoff = /** @type {import("./lib/lm.js").CutoffId} */ (id);
     try { cutoffSave(id); } catch { storageFailed(); }
-    renderCutoffRow(els.obCutoffRow, els.obCutoffLine);
+    renderCutoffRow(els.obCutoffRow, null);
     haptic(8);
-    void loadDeckQuiet({ force: true });
+    void obLoad({ force: true }); // replay-before-fetch, like every other wizard load
   }
 
   /** "Start sorting" / "Done": leave the wizard and put the deck on the table. */
@@ -3058,6 +3062,37 @@ function main() {
     }
   }
 
+  // ---------- sound prefs (Settings + wizard) ----------
+  /** @param {boolean} on  the toggle click is the audio unlock gesture */
+  function setMusicPref(on) {
+    audioPrefs = { ...audioPrefs, music: on };
+    try { audioSave(audioPrefs); } catch { /* session-only then */ }
+    els.musicToggle.checked = on;
+    els.obMusicToggle.checked = on;
+    updateMusicChip();
+    if (on) {
+      ensureAudio();
+      music?.enable();
+    } else {
+      music?.disable();
+      // suspend only when BOTH are off — the context is shared with SFX
+      if (!audioPrefs.sfx) void audioBus?.ctx.suspend().catch(() => { /* additive only */ });
+    }
+  }
+  /** @param {boolean} on */
+  function setSfxPref(on) {
+    audioPrefs = { ...audioPrefs, sfx: on };
+    try { audioSave(audioPrefs); } catch { /* session-only then */ }
+    els.sfxToggle.checked = on;
+    els.obSfxToggle.checked = on;
+    if (on) {
+      ensureAudio();
+      void audioBus?.ctx.resume().catch(() => { /* additive only */ }); // gesture
+    } else if (!audioPrefs.music) {
+      void audioBus?.ctx.suspend().catch(() => { /* additive only */ });
+    }
+  }
+
   // ---------- events ----------
   function bindUI() {
     els.btnAccept.addEventListener("click", actAccept);
@@ -3157,12 +3192,6 @@ function main() {
       obRender();
       if (obChoice === "own") els.obOrInput.focus();
     });
-    els.obCutoffChange.addEventListener("click", () => {
-      const show = els.obCutoffRow.hidden;
-      els.obCutoffRow.hidden = !show;
-      els.obCutoffLine.hidden = !show;
-      els.obCutoffChange.setAttribute("aria-expanded", String(show));
-    });
     els.obCutoffRow.addEventListener("click", (e) => {
       const b = e.target instanceof Element ? e.target.closest("[data-cutoff]") : null;
       if (b instanceof HTMLElement && b.dataset.cutoff) obPickCutoff(b.dataset.cutoff);
@@ -3196,29 +3225,12 @@ function main() {
         setBadge(0);
       }
     });
-    els.musicToggle.addEventListener("change", () => {
-      audioPrefs = { ...audioPrefs, music: els.musicToggle.checked };
-      try { audioSave(audioPrefs); } catch { /* session-only then */ }
-      updateMusicChip();
-      if (audioPrefs.music) {
-        ensureAudio();
-        music?.enable(); // the toggle click is the unlock gesture
-      } else {
-        music?.disable();
-        // suspend only when BOTH are off — the context is shared with SFX
-        if (!audioPrefs.sfx) void audioBus?.ctx.suspend().catch(() => { /* additive only */ });
-      }
-    });
-    els.sfxToggle.addEventListener("change", () => {
-      audioPrefs = { ...audioPrefs, sfx: els.sfxToggle.checked };
-      try { audioSave(audioPrefs); } catch { /* session-only then */ }
-      if (audioPrefs.sfx) {
-        ensureAudio();
-        void audioBus?.ctx.resume().catch(() => { /* additive only */ }); // gesture
-      } else if (!audioPrefs.music) {
-        void audioBus?.ctx.suspend().catch(() => { /* additive only */ });
-      }
-    });
+    // Sound toggles live in Settings AND on the wizard's last step; both drive the
+    // same setters, and each mirrors the other so a reopened surface shows the truth.
+    els.musicToggle.addEventListener("change", () => setMusicPref(els.musicToggle.checked));
+    els.sfxToggle.addEventListener("change", () => setSfxPref(els.sfxToggle.checked));
+    els.obMusicToggle.addEventListener("change", () => setMusicPref(els.obMusicToggle.checked));
+    els.obSfxToggle.addEventListener("change", () => setSfxPref(els.obSfxToggle.checked));
     els.musicSkip.addEventListener("click", () => music?.skip());
     els.musicBan.addEventListener("click", () => music?.ban());
     els.musicMute.addEventListener("click", () => {
