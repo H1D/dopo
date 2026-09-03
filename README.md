@@ -5,7 +5,7 @@ mobile-first, game-like review UI: one card at a time, swipe right to accept the
 left to park, tap to override. GLM-5.3-flash (via OpenRouter, bring your own key) does the guessing;
 you stay the judge. No key yet? A shared free tier gets you started (see [What it costs](#what-it-costs)).
 
-**Use it now: [dopo.artems.net](https://dopo.artems.net)** — no signup; paste your two tokens and swipe.
+**Use it now: [dopo.artems.net](https://dopo.artems.net)** — no signup; a short setup walks you through it.
 
 There is no backend. The whole app is a folder of vanilla ES modules served as static files. Your
 Lunch Money token and OpenRouter key live in your browser's storage and are sent by your browser

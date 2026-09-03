@@ -26,7 +26,11 @@ import {
   rulesLoad, ruleAdd, rulesSave,
   cutoffLoad, cutoffSave, fetchWindow,
   audioLoad, audioSave,
+  onboardCursorLoad, onboardCursorSave, onboardCursorClear,
 } from "./lib/store.js";
+import {
+  stepsFor, nextStep, prevStep, nextFieldState, FIELD_IDLE, canAdvance, orChoices,
+} from "./lib/onboard.js";
 import { replayQueue, isPoisonStatus, STUCK_AFTER_ATTEMPTS } from "./lib/sync.js";
 import {
   assembleState, assembleFromSnapshot, attachSuggestions, classifyPass1, webCheck, merchantKeyOf,
@@ -44,6 +48,8 @@ import { createMusic } from "./lib/music.js";
 /** @typedef {import("./lib/lm.js").LMAccount} Account */
 /** @typedef {import("./lib/store.js").QueueItem} QueueItem */
 /** @typedef {import("./lib/rules.js").Rule} Rule */
+/** @typedef {import("./lib/onboard.js").StepId} StepId */
+/** @typedef {import("./lib/onboard.js").FieldState} FieldState */
 /**
  * @typedef {object} UndoState
  * @property {"apply"|"park"} kind
@@ -227,7 +233,33 @@ function main() {
   let lastTopId = "";
   /** Median absolute amount of the loaded deck; heft() scores against it. */
   let amountRef = 0;
-  let onboardingActive = false; // missing LM token -> "Connect Lunch Money" card
+  // ---- onboarding wizard (<dialog>) — see the "onboarding wizard" section
+  let onboardingActive = false; // wizard open: deck torn down; refresh/flush/classify contained
+  let obReturning = false; // Forget-tokens path: lm [+ or] only, primary "Done"
+  /** @type {StepId[]} */
+  let obSteps = [];
+  /** @type {StepId} */
+  let obStep = "welcome";
+  /** @type {{lm: FieldState, or: FieldState}} */
+  let obField = { lm: FIELD_IDLE, or: FIELD_IDLE };
+  /** @type {{lm: boolean, or: boolean}} */
+  let obDead = { lm: false, or: false }; // the saved token was just rejected: an empty field can't Continue past it
+  /** @type {"free"|"none"|"own"|null} */
+  let obChoice = null; // AI step radio; nothing pre-selected
+  /** @type {ReturnType<typeof setTimeout>|null} */
+  let obDebounce = null; // 600 ms after the last keystroke the field validates itself
+  /** @type {{lm: Promise<void>|null, or: Promise<void>|null}} */
+  const obCheck = { lm: null, or: null }; // in-flight validation per field — Continue awaits it
+  let obContinuing = false; // Continue re-entrancy latch (blur-validate + tap + Enter can land together)
+  /** @type {Promise<void>|null} */
+  let loadInFlight = null; // wizard-side quiet deck fetch
+  /** @type {string|null} */
+  let loadInFlightFor = null; // the LM token loadInFlight was started under
+  let fetchGen = 0; // bumped when the deck's identity changes (token change, wizard open): older fetches are stale
+  /** @type {string|null} */
+  let replayedFor = null; // LM token the persisted queue was last replayed under
+  /** @type {Promise<void>|null} */
+  let replayInFlight = null; // a second caller (wizard finish vs. AI step) joins it instead of racing
   /** @type {Set<"lm"|"or">} */
   const deadTokenNoted = new Set(); // dead tokens already routed to Settings this session
   // ---- shared free tier (lib/freekey.js): used only while the user has no key of their own
@@ -295,6 +327,15 @@ function main() {
     if (!(el instanceof HTMLCanvasElement)) throw new Error(`missing canvas ${sel}`);
     return el;
   };
+  /**
+   * @param {string} sel
+   * @returns {HTMLDialogElement}
+   */
+  const $dialog = (sel) => {
+    const el = document.querySelector(sel);
+    if (!(el instanceof HTMLDialogElement)) throw new Error(`missing dialog ${sel}`);
+    return el;
+  };
 
   const els = {
     stack: $el("#stack"), progressFill: $el("#progressFill"), meter: $el("#meter"),
@@ -322,7 +363,12 @@ function main() {
     musicChip: $btn("#musicChip"), musicPop: $el("#musicPop"),
     musicTitle: $el("#musicTitle"), musicAuthor: $el("#musicAuthor"),
     musicSkip: $btn("#musicSkip"), musicMute: $btn("#musicMute"), musicBan: $btn("#musicBan"),
-    onboardCard: $el("#onboardCard"), onboardOpen: $btn("#onboardOpen"),
+    onboard: $dialog("#onboard"), obStepLabel: $el("#obStepLabel"), obDots: $el("#obDots"),
+    obLmInput: $input("#obLmInput"), obLmShow: $btn("#obLmShow"), obLmHint: $el("#obLmHint"), obLmError: $el("#obLmError"),
+    obAiGroup: $el("#obAiGroup"), obOrField: $el("#obOrField"),
+    obOrInput: $input("#obOrInput"), obOrShow: $btn("#obOrShow"), obOrHint: $el("#obOrHint"), obOrError: $el("#obOrError"),
+    obCount: $el("#obCount"), obCutoffChange: $btn("#obCutoffChange"), obCutoffRow: $el("#obCutoffRow"), obCutoffLine: $el("#obCutoffLine"),
+    obNote: $el("#obNote"), obBack: $btn("#obBack"), obSecondary: $btn("#obSecondary"), obNext: $btn("#obNext"),
     webBar: $el("#webBar"), webBarBtn: $btn("#webBarBtn"),
     connChip: $el("#connChip"), staleBanner: $el("#staleBanner"), stuckBanner: $btn("#stuckBanner"),
     upgradeBanner: $btn("#upgradeBanner"),
@@ -365,10 +411,15 @@ function main() {
   let noteTimer;
   /** @param {string} msg @param {number} [ms] */
   function note(msg, ms = 2500) {
-    els.note.textContent = msg;
-    els.note.hidden = false;
+    // the page toast sits under the wizard's backdrop: route into the dialog while it's up
+    const target = onboardingActive ? els.obNote : els.note;
+    els.note.hidden = true;
+    els.obNote.hidden = true;
+    els.obNote.textContent = ""; // #obNote hides by :empty, not [hidden]
+    target.textContent = msg;
+    target.hidden = false;
     clearTimeout(noteTimer);
-    noteTimer = setTimeout(() => { els.note.hidden = true; }, ms);
+    noteTimer = setTimeout(() => { target.hidden = true; if (target === els.obNote) target.textContent = ""; }, ms);
   }
 
   // ---------- deck (queue + Later excluded on EVERY build) ----------
@@ -419,7 +470,15 @@ function main() {
       e.noToken = true;
       throw e;
     }
+    const gen = fetchGen;
     const data = await assembleState(tokens.lm, rules);
+    if (gen !== fetchGen) {
+      // the token changed (or the wizard tore the deck down) while paginating:
+      // committing would deal another account's transactions under the new token
+      const e = /** @type {Error & {stale?: boolean}} */ (new Error("Stale fetch discarded"));
+      e.stale = true;
+      throw e;
+    }
     categories = data.categories;
     catById = new Map(categories.map((c) => [c.id, c]));
     accounts = data.accounts;
@@ -471,7 +530,7 @@ function main() {
     // AUTOMATIC classification is live-mode + online only (snapshot decks already
     // carry cached suggestions; hammering a dead network helps nobody). Explicit
     // user actions reach the network via refresh()/maybeWebCheck(true) instead.
-    if (classifyRunning || loadState !== "live" || connOffline()) return;
+    if (classifyRunning || loadState !== "live" || connOffline() || onboardingActive) return;
     const unsuggested = [...set, ...backlog].filter((t) => !t.suggestion);
     if (!unsuggested.length) { maybeWebCheck(); return; }
     const creds = orCreds();
@@ -642,7 +701,7 @@ function main() {
   async function refresh() {
     // Allowed in "snapshot" mode — refresh IS the recovery path out of an offline
     // boot (else a snapshot session strands forever); only "none" has nothing to refresh.
-    if (refreshing || loadState === "none" || sheetOpenNow()) return;
+    if (refreshing || loadState === "none" || sheetOpenNow() || onboardingActive) return;
     refreshing = true;
     try {
       await flush("refresh");
@@ -650,7 +709,7 @@ function main() {
       reconcile(); // behind the top card only
       ensureClassified();
     } catch (e) {
-      if (!isNoTokenErr(e)) noteConnOutcome("lm", e);
+      if (!isNoTokenErr(e) && !isStaleErr(e)) noteConnOutcome("lm", e);
       routeLMError(e);
       // unrouted network errors: silent, next refresh will retry (recovery probe)
     } finally {
@@ -661,6 +720,8 @@ function main() {
   // ---------- connectivity reducer (fetch outcomes are truth; events are probes) ----------
   /** Local pre-fetch error (missing token): never a network outcome. @param {unknown} e */
   const isNoTokenErr = (e) => e instanceof Error && /** @type {Error & {noToken?: boolean}} */ (e).noToken === true;
+  /** A fetch that outlived its token (fetchGen moved): local, silent, never a network outcome. @param {unknown} e */
+  const isStaleErr = (e) => e instanceof Error && /** @type {Error & {stale?: boolean}} */ (e).stale === true;
 
   /** The settled verdict the UI and gates read. Two consecutive LM-origin failures
    *  OR the browser flatly saying so — a single blip must not paint the app offline. */
@@ -701,6 +762,13 @@ function main() {
   }
   async function runOnlineResync() {
     try { await flush("online"); } catch { /* flush routes/backs off internally */ }
+    if (onboardingActive) {
+      pendingSheetResync = true; // re-armed when the wizard closes
+      if (obStep === "done" && loadState !== "live") void obLoad({}); // "loads when you reconnect"
+      const w = obFieldOf();
+      if (w && obField[w].status === "netfail" && obField[w].value) void obValidate(w); // "checks it when you reconnect"
+      return;
+    }
     if (sheetOpenNow()) { pendingSheetResync = true; return; } // re-armed on sheet close
     refresh(); // quiet failure degrades back into the reducer/backoff
   }
@@ -816,6 +884,7 @@ function main() {
   /** @param {string} reason */
   async function flush(reason) {
     if (!tokens.lm) return;
+    if (onboardingActive) return; // the wizard owns the network; only replayIfNeeded runs behind it
     if (bootReplaying) return; // replayQueue owns the queue right now; later triggers cover the rest
     if (reason === "hidden") { flushHidden(tokens.lm); return; }
     const lmToken = tokens.lm;
@@ -1648,9 +1717,10 @@ function main() {
       try { history.back(); } catch { /* sandboxed */ }
     }
   }
-  /** @param {HTMLElement} sheet */
-  function closeSheet(sheet) {
-    consumeSheetHistory();
+  /** @param {HTMLElement} sheet @param {{keepHistory?: boolean}} [opts]  keepHistory: the
+   *  history entry is handed to what opens next (the wizard) instead of popped */
+  function closeSheet(sheet, opts = {}) {
+    if (!opts.keepHistory) consumeSheetHistory();
     sheet.classList.remove("open");
     els.backdrop.classList.add("closing");
     setTimeout(() => {
@@ -1826,14 +1896,16 @@ function main() {
   }
 
   // ---------- settings: deck cutoff ----------
-  function renderCutoffRow() {
+  /** Chips + "from <date>" line; Settings and the wizard's done step share it.
+   *  @param {HTMLElement} [container] @param {HTMLElement} [lineEl] */
+  function renderCutoffRow(container = els.cutoffRow, lineEl = els.cutoffLine) {
     const btnHtml = (/** @type {{id: string, label: string}} */ p) =>
       `<button type="button" class="cutoff-chip${p.id === cutoff ? " on" : ""}"
         data-cutoff="${esc(p.id)}" aria-pressed="${p.id === cutoff ? "true" : "false"}">${esc(p.label)}</button>`;
     const chipsHtml = CUTOFF_PRESETS.map(btnHtml).join("");
-    els.cutoffRow.innerHTML = chipsHtml;
+    container.innerHTML = chipsHtml;
     const { startDate } = fetchWindow();
-    els.cutoffLine.textContent = `Showing transactions from ${fmtTxnDate(startDate)} onwards.`;
+    lineEl.textContent = `Showing transactions from ${fmtTxnDate(startDate)} onwards.`;
   }
 
   /** @param {string} id */
@@ -1855,7 +1927,7 @@ function main() {
     try {
       await fetchState();
     } catch (e) {
-      if (!isNoTokenErr(e)) noteConnOutcome("lm", e);
+      if (!isNoTokenErr(e) && !isStaleErr(e)) noteConnOutcome("lm", e);
       routeLMError(e);
       return; // the old deck stays; the banner/chip already say why
     }
@@ -2031,21 +2103,22 @@ function main() {
         }
       }
       // MERGE semantics in store.setTokens: saving one token never drops the other
-      try { setTokens({ ...(lm ? { lm } : {}), ...(or ? { or } : {}) }); } catch { storageFailed(); }
-      tokens = getTokens();
+      if (!onTokensChanged({ ...(lm ? { lm } : {}), ...(or ? { or } : {}) })) {
+        setSettingsError("Couldn't save — this device's storage may be full.");
+        return;
+      }
       saveAnywayArmed = false;
-      if (lm) deadTokenNoted.delete("lm");
-      if (or) { deadTokenNoted.delete("or"); orCreditNoted = false; freeQuotaHit = null; updateUpgradeBanner(); } // own key: the free quota no longer applies
       els.lmTokenInput.value = "";
       els.orTokenInput.value = "";
       note("Saved ✓");
       const reloading = closeSettingsSheet();
-      if (onboardingActive) hideOnboarding();
       // let the close animation land, then (re)load with the new tokens — unless a
       // cutoff change is already refetching, in which case this would just double up
       setTimeout(() => {
         if (reloading) { updateWebBar(); return; }
-        if (loadState !== "none") { refresh(); updateWebBar(); } else retryLoad(); // snapshot takes the refresh() arm
+        void replayIfNeeded().then(() => { // a new LM token: the persisted queue replays under it first
+          if (loadState !== "none") { refresh(); updateWebBar(); } else retryLoad(); // snapshot takes the refresh() arm
+        });
       }, reducedMotion ? 200 : 420);
     } catch (e) {
       setSettingsError((e instanceof Error && e.message) || "Couldn't save — try again.");
@@ -2071,8 +2144,10 @@ function main() {
       return;
     }
     disarmForget();
-    clearTokens();
+    clearTokens(); // tokens AND the wizard cursor
     tokens = getTokens();
+    replayedFor = null;
+    cutoffDirty = false; // the wizard refetches on its own; no redeal owed on the next sheet close
     disarmSaveAnyway();
     els.lmTokenHint.hidden = true;
     paintOrHint(); // back on the shared free tier, if there is one
@@ -2083,19 +2158,534 @@ function main() {
     updateWebCheckLine();
     updateWebBar();
     updateUpgradeBanner();
+    // The wizard takes the sheet's place — and its history entry: popping the sheet's
+    // entry (history.back) and pushing the wizard's in the same tick would race.
+    closeSheet(els.settingsSheet, { keepHistory: true });
+    showOnboarding({ returning: true, adoptHistory: true });
     note("Tokens forgotten on this device");
-    showOnboarding();
   }
 
-  // ---------- onboarding (missing LM token) ----------
-  function showOnboarding() {
-    if (onboardingActive) return;
-    onboardingActive = true;
-    els.onboardCard.hidden = false;
+  // ---------- onboarding wizard (<dialog>: first run, interrupted setup, Forget tokens) ----------
+  // Pure step/field logic lives in lib/onboard.js; this section is the DOM + the
+  // containment: while the wizard is up the deck is torn down and every network-
+  // adjacent loop (refresh, flush, classify, resync, update toast) waits.
+  const hasFreeTier = () => !!FREE_KEY && !freeTierDead;
+  /** @param {"lm"|"or"} which */
+  const obInput = (which) => (which === "lm" ? els.obLmInput : els.obOrInput);
+  /** A token on file lets an EMPTY field Continue (Back after saving) — unless the
+   *  upstream just rejected that token. @param {"lm"|"or"} which */
+  const obSaved = (which) => (which === "lm" ? !!tokens.lm : !!tokens.or) && !obDead[which];
+  /** The field the current step validates, if any. */
+  const obFieldOf = () => (obStep === "lm" ? "lm" : obStep === "or" && obChoice === "own" ? "or" : null);
+  const obAdvance = () => canAdvance({
+    stepId: obStep, steps: obSteps, returning: obReturning, choice: obChoice,
+    field: obStep === "or" ? obField.or : obField.lm,
+    saved: obSaved(obStep === "or" ? "or" : "lm"),
+  });
+  /** @param {"lm"|"or"} which */
+  const obSavedHint = (which) => (obSaved(which)
+    ? (which === "lm" ? "Connected ✓ — paste a different token to replace it" : "Key saved ✓ — paste a different key to replace it")
+    : null);
+  function obClearDebounce() {
+    if (obDebounce) { clearTimeout(obDebounce); obDebounce = null; }
   }
+
+  /** @param {{returning?: boolean, adoptHistory?: boolean}} [opts]
+   *  returning: Forget-tokens path (lm [+ or]; no welcome/done). adoptHistory: the
+   *  caller hands over an open sheet's history entry, so no pushState here. */
+  function showOnboarding(opts = {}) {
+    if (onboardingActive) return; // load-bearing: routeLMError re-enters on every failed retry
+    onboardingActive = true;
+    obReturning = opts.returning === true;
+    obSteps = stepsFor({ returning: obReturning, hasFreeTier: hasFreeTier() });
+    // Tear the deck down: whatever is loaded belongs to tokens that are gone or
+    // unverified, and a live deck would keep pulling on the network behind the wizard.
+    abortDrag();
+    finalizeUndo();
+    fetchGen++; // an in-flight fetch for the old deck must not land under the wizard
+    loadState = "none";
+    allTxns = []; set = []; backlog = [];
+    snapshotIds.clear();
+    lastFetchTs = null;
+    snapshotFetchedAt = null;
+    stateError = null;
+    renderStack();
+    updateMeters();
+    updateConnUI();
+    obChoice = null;
+    obField = { lm: FIELD_IDLE, or: FIELD_IDLE };
+    obDead = { lm: false, or: false };
+    for (const which of /** @type {const} */ (["lm", "or"])) {
+      obInput(which).value = "";
+      obSetShown(which, false);
+      obPaintField(which, null, null);
+    }
+    els.obCutoffRow.hidden = true;
+    els.obCutoffLine.hidden = true;
+    els.obCutoffChange.hidden = true;
+    els.obCutoffChange.setAttribute("aria-expanded", "false");
+    els.obNote.hidden = true;
+    els.obNote.textContent = "";
+    if (!opts.adoptHistory) {
+      try { history.pushState({ dopoOb: true }, ""); sheetHistoryDepth++; } catch { /* sandboxed */ }
+    }
+    if (!els.onboard.open) els.onboard.showModal();
+    obGoto(obStartStep());
+  }
+
+  /** Resume point: the cursor wins when it names a step of this run — but never
+   *  "welcome" once a token exists, and never past "lm" without one. */
+  function obStartStep() {
+    const first = obSteps[0] ?? "welcome";
+    if (obReturning) return first;
+    const cursor = onboardCursorLoad();
+    let start = cursor !== null && obSteps.includes(cursor) ? cursor : first;
+    if (tokens.lm && start === "welcome") start = "lm";
+    if (!tokens.lm && (start === "or" || start === "done")) start = "lm";
+    return start;
+  }
+
   function hideOnboarding() {
+    if (!onboardingActive) return;
     onboardingActive = false;
-    els.onboardCard.hidden = true;
+    obClearDebounce();
+    consumeSheetHistory();
+    if (els.onboard.open) els.onboard.close();
+    els.obNote.hidden = true;
+    els.obNote.textContent = "";
+    maybeShowUpdateToast(); // a "New version" toast suppressed by the wizard may surface now
+    if (pendingSheetResync) { pendingSheetResync = false; scheduleOnlineResync(); } // wizard-blocked online refresh re-arms
+  }
+
+  /** @param {StepId} id @param {{dead?: boolean}} [opts]  dead: the upstream just rejected the saved token */
+  function obGoto(id, opts = {}) {
+    obClearDebounce();
+    obStep = id;
+    try { onboardCursorSave(id); } catch { storageFailed(); }
+    if (id === "lm" || id === "or") obEnterField(id, opts.dead === true);
+    if (id === "or") renderAiChoices();
+    obShowPanel(id);
+    obRender();
+    if (id === "done") obRenderDone();
+  }
+
+  function obBack() {
+    const p = prevStep(obSteps, obStep);
+    if (p) obGoto(p);
+  }
+
+  /** Fresh field on entry (Back-after-save shows an empty box over the saved token).
+   *  Offline seeds the netfail state so Continue reads "Try again / Continue anyway"
+   *  before anything is typed.
+   *  @param {"lm"|"or"} which @param {boolean} dead */
+  function obEnterField(which, dead) {
+    obInput(which).value = "";
+    obField[which] = FIELD_IDLE;
+    obDead[which] = obDead[which] || dead; // sticks until onTokensChanged saves a replacement
+    if (dead && which === "or") obChoice = "own"; // the key field must be visible to take the replacement
+    /** @type {string|null} */
+    let error = null;
+    if (dead) {
+      error = which === "lm"
+        ? "Lunch Money stopped accepting this token — paste a fresh one."
+        : "OpenRouter stopped accepting this key — paste a fresh one.";
+    }
+    /** @type {string|null} */
+    let hint = error ? null : obSavedHint(which);
+    if (navigator.onLine === false) {
+      // informational, not a rejection: it goes in the status hint, not the red error slot
+      obField[which] = nextFieldState(obField[which], { type: "offline", value: "" });
+      hint = "You're offline — paste it anyway and dopo checks it when you reconnect.";
+    }
+    obPaintField(which, hint, error);
+  }
+
+  /** @param {"lm"|"or"} which @param {string|null} hint @param {string|null} error */
+  function obPaintField(which, hint, error) {
+    const hintEl = which === "lm" ? els.obLmHint : els.obOrHint;
+    const errEl = which === "lm" ? els.obLmError : els.obOrError;
+    hintEl.textContent = hint || "";
+    hintEl.hidden = !hint;
+    errEl.textContent = error || "";
+    errEl.hidden = !error;
+    obInput(which).classList.toggle("invalid", !!error);
+  }
+
+  /** @param {"lm"|"or"} which @param {boolean} shown */
+  function obSetShown(which, shown) {
+    const btn = which === "lm" ? els.obLmShow : els.obOrShow;
+    obInput(which).type = shown ? "text" : "password";
+    btn.textContent = shown ? "Hide" : "Show";
+    btn.setAttribute("aria-pressed", String(shown));
+  }
+  /** @param {"lm"|"or"} which */
+  function obToggleShown(which) {
+    obSetShown(which, obInput(which).type === "password");
+    obInput(which).focus();
+  }
+
+  /** @param {StepId} id */
+  function obShowPanel(id) {
+    for (const p of els.onboard.querySelectorAll(".onboard-step")) {
+      if (!(p instanceof HTMLElement)) continue;
+      const on = p.dataset.step === id;
+      p.classList.remove("ob-enter");
+      p.hidden = !on;
+      if (!on) continue;
+      if (!reducedMotion) { void p.offsetWidth; p.classList.add("ob-enter"); } // reflow restarts the fade/slide
+      const h = p.querySelector(".ob-title");
+      if (h instanceof HTMLElement) {
+        if (!h.id) h.id = `obTitle-${id}`;
+        els.onboard.setAttribute("aria-labelledby", h.id);
+        h.focus();
+      }
+    }
+  }
+
+  /** Chrome (label, dots, Back/Next/secondary) + the own-key field's visibility. */
+  function obRender() {
+    if (!onboardingActive) return;
+    const adv = obAdvance();
+    const n = obSteps.length;
+    const i = Math.max(0, obSteps.indexOf(obStep));
+    els.obStepLabel.hidden = n <= 1;
+    els.obStepLabel.textContent = `Step ${i + 1} of ${n}`;
+    els.obDots.hidden = n <= 1;
+    els.obDots.textContent = "";
+    for (let k = 0; k < n; k++) {
+      const dot = document.createElement("span");
+      dot.className = `dot${k < i ? " done" : k === i ? " on" : ""}`;
+      els.obDots.appendChild(dot);
+    }
+    els.obBack.hidden = !adv.showBack;
+    // A check in flight keeps Next tappable: blur-validate + tap arrive together, and
+    // a disabled button would swallow the tap — obContinue waits for the check instead.
+    const which = obFieldOf();
+    const checking = which !== null && obField[which].status === "checking";
+    els.obNext.textContent = adv.primary;
+    els.obNext.disabled = !adv.canContinue && !checking;
+    els.obNext.setAttribute("aria-busy", String(checking));
+    els.obSecondary.hidden = adv.secondary === null;
+    els.obSecondary.textContent = adv.secondary ?? "";
+    els.obOrField.hidden = !(obStep === "or" && obChoice === "own");
+  }
+
+  /** The AI step's radio group, built with createElement — its copy is data, not markup. */
+  function renderAiChoices() {
+    const choices = orChoices(hasFreeTier());
+    if (obChoice !== null && !choices.some((c) => c.id === obChoice)) obChoice = null; // free tier died mid-run
+    els.obAiGroup.textContent = "";
+    for (const c of choices) {
+      const label = document.createElement("label");
+      label.className = "ob-choice";
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "obAi";
+      radio.value = c.id;
+      radio.checked = obChoice === c.id;
+      if (c.id === "own") radio.setAttribute("aria-controls", "obOrField");
+      const body = document.createElement("div");
+      body.className = "ob-choice-body";
+      const title = document.createElement("strong");
+      title.className = "ob-choice-title";
+      title.textContent = c.title;
+      body.appendChild(title);
+      if (c.lead) {
+        const lead = document.createElement("p");
+        lead.className = "ob-choice-lead";
+        lead.textContent = c.lead;
+        body.appendChild(lead);
+      }
+      if (c.bullets.length) {
+        const ul = document.createElement("ul");
+        ul.className = "ob-choice-bullets";
+        for (const b of c.bullets) {
+          const li = document.createElement("li");
+          li.textContent = b;
+          ul.appendChild(li);
+        }
+        body.appendChild(ul);
+      }
+      label.append(radio, body);
+      els.obAiGroup.appendChild(label);
+    }
+  }
+
+  /** @param {"lm"|"or"} which */
+  function obOnInput(which) {
+    const val = obInput(which).value.trim();
+    const next = nextFieldState(obField[which], { type: "edit", value: val });
+    if (next !== obField[which]) { obField[which] = next; obPaintField(which, null, null); }
+    obClearDebounce();
+    if (val) obDebounce = setTimeout(() => { obDebounce = null; void obValidate(which); }, 600);
+    obRender();
+  }
+  /** @param {"lm"|"or"} which */
+  function obOnBlur(which) {
+    if (obInput(which).value.trim() && obField[which].status === "idle") void obValidate(which);
+  }
+
+  /** Validate the field's current value against its upstream and feed the outcome
+   *  through nextFieldState (a stale answer — the user kept typing — is dropped there).
+   *  Returns the in-flight promise when the same value is already being checked.
+   *  @param {"lm"|"or"} which @returns {Promise<void>} */
+  function obValidate(which) {
+    const cur = obField[which];
+    const val = obInput(which).value.trim();
+    if (cur.status === "checking" && cur.value === val && obCheck[which]) return obCheck[which];
+    const p = obValidateRun(which, val).finally(() => { if (obCheck[which] === p) obCheck[which] = null; });
+    obCheck[which] = p;
+    return p;
+  }
+  /** @param {"lm"|"or"} which @param {string} val */
+  async function obValidateRun(which, val) {
+    obClearDebounce();
+    const cur = obField[which];
+    if (!val) {
+      // nothing to check; online, an empty field just means "keep the saved token"
+      if (navigator.onLine !== false) { obField[which] = FIELD_IDLE; obPaintField(which, obSavedHint(which), null); }
+      obRender();
+      return;
+    }
+    if (cur.value === val && (cur.status === "ok" || cur.status === "armed")) return; // already known
+    if (navigator.onLine === false) {
+      obField[which] = nextFieldState(cur, { type: "offline", value: val });
+      obPaintField(which, "You're offline — dopo checks it when you reconnect.", null);
+      obRender();
+      return;
+    }
+    obField[which] = nextFieldState(cur, { type: "check", value: val });
+    obPaintField(which, null, null);
+    obRender();
+    /** @type {import("./lib/onboard.js").FieldEvent} */
+    let ev;
+    /** @type {string|null} */
+    let hint = null;
+    /** @type {string|null} */
+    let error = null;
+    try {
+      if (which === "lm") {
+        const me = await getMe(val);
+        hint = me.budget_name ? `Connected ✓ — budget “${me.budget_name}”` : "Connected ✓";
+      } else {
+        await checkKey(val);
+        hint = "Key OK ✓";
+      }
+      ev = { type: "ok", value: val };
+    } catch (e) {
+      const rejected = which === "lm"
+        ? (e instanceof LMError && e.tokenInvalid)
+        : (e instanceof ORError && e.tokenInvalid);
+      ev = rejected ? { type: "bad", value: val } : { type: "netfail", value: val };
+      error = rejected
+        ? (which === "lm" ? "Lunch Money rejected this token." : "OpenRouter rejected this key.")
+        : (which === "lm" ? "Couldn't reach Lunch Money." : "Couldn't reach OpenRouter.");
+    }
+    const next = nextFieldState(obField[which], ev);
+    if (next === obField[which]) return; // stale: the field moved on while we waited
+    obField[which] = next;
+    obPaintField(which, hint, error);
+    obRender();
+  }
+
+  /** Primary button: validate if needed, commit the step's token, advance. */
+  async function obContinue() {
+    if (!onboardingActive || obContinuing) return;
+    obContinuing = true;
+    try {
+      const step = obStep;
+      const which = obFieldOf();
+      let adv = obAdvance();
+      if (which && (adv.checkFirst || obField[which].status === "checking")) {
+        await obValidate(which);
+        if (!onboardingActive || obStep !== step) return; // hardware back / dead-token jump meanwhile
+        adv = obAdvance();
+      }
+      if (!adv.canContinue) return;
+      if (which) {
+        const { status, value } = obField[which];
+        if (value === "" && !obSaved(which)) return; // nothing pasted and nothing saved: the labels lie only if this is reachable
+        if (value !== "" && status !== "ok" && status !== "armed") return; // bad / netfail: painted, labels say so
+        if (value !== "" && !onTokensChanged(which === "lm" ? { lm: value } : { or: value })) {
+          note("Couldn't save the token — this device's storage may be full", 5000);
+          return;
+        }
+      } else if (step === "or" && tokens.or) {
+        // free / none picked with an own key on file (Back after saving one): the
+        // radio is the truth — drop the key rather than silently keep using it
+        if (!onTokensChanged({ or: null })) { note("Couldn't update the key — this device's storage may be full", 5000); return; }
+      }
+      const n = nextStep(obSteps, step);
+      if (step === "or" && n) void obLoad({}); // the done step wants the count; a last step loads via obFinish
+      if (n) obGoto(n); else void obFinish();
+    } finally {
+      obContinuing = false;
+    }
+  }
+
+  /** Secondary button ("Continue anyway" after a netfail): commit unverified. */
+  function obSecondaryTap() {
+    const which = obFieldOf();
+    if (!which) return;
+    obField[which] = nextFieldState(obField[which], { type: "arm" });
+    obRender();
+    void obContinue();
+  }
+
+  /** The AI step's Continue and the done step's own kick-off: replay the queue
+   *  under the (possibly new) token, then fetch the deck quietly.
+   *  @param {{force?: boolean}} opts */
+  async function obLoad(opts) {
+    await replayIfNeeded();
+    if (!onboardingActive || obDead.lm) return; // the replay just found the token dead
+    await loadDeckQuiet(opts);
+  }
+
+  /** Wizard-side deck fetch: state only — no deal, no animation, no classify; the
+   *  done step repaints its count line from the outcome. One in flight at a time,
+   *  and a second live fetch only on `force` (cutoff change).
+   *  @param {{force?: boolean}} [opts] @returns {Promise<void>} */
+  function loadDeckQuiet(opts = {}) {
+    if (loadInFlight) {
+      if (loadInFlightFor === tokens.lm) return loadInFlight;
+      return loadInFlight.then(() => loadDeckQuiet(opts)); // Back → new token → forward: the old fetch is stale, start over
+    }
+    if (!tokens.lm || (loadState === "live" && !opts.force)) return Promise.resolve();
+    const run = async () => {
+      const loadedCutoff = cutoff;
+      try {
+        await fetchState();
+        backlog = eligible(allTxns).sort(byConfDesc);
+      } catch (e) {
+        if (isStaleErr(e)) return; // the chained load under the new token repaints
+        if (!isNoTokenErr(e)) noteConnOutcome("lm", e);
+        stateError = e instanceof Error ? e : new Error("Couldn't load");
+        routeLMError(e); // dead token → back to the lm step
+      } finally {
+        loadInFlight = null;
+        loadInFlightFor = null;
+      }
+      // chip tapped mid-fetch — but not on a token that just bounced us back to the lm step
+      if (cutoff !== loadedCutoff && onboardingActive && !obDead.lm) { await loadDeckQuiet({ force: true }); return; }
+      obRenderDone();
+    };
+    stateError = null;
+    loadInFlightFor = tokens.lm;
+    loadInFlight = run();
+    obRenderDone(); // "Loading your transactions…" — after the flag is set, so it doesn't re-kick itself
+    return loadInFlight;
+  }
+
+  /** Done step: live count line + cutoff chips. Starts the load itself when
+   *  nothing is loaded yet (cursor resume lands here directly). */
+  function obRenderDone() {
+    if (!onboardingActive || obStep !== "done") return;
+    renderCutoffRow(els.obCutoffRow, els.obCutoffLine);
+    let msg;
+    if (loadInFlight) msg = "Loading your transactions…";
+    else if (loadState === "live" && !stateError) {
+      const { startDate } = fetchWindow();
+      const preset = CUTOFF_PRESETS.find((p) => p.id === cutoff)?.label ?? cutoff;
+      msg = `${backlog.length} uncategorized since ${fmtTxnDate(startDate)} (${preset})`;
+    } else if (connOffline()) msg = "You're offline — dopo loads your transactions when you reconnect.";
+    else if (stateError) msg = "Couldn't load yet — dopo retries when you start.";
+    else { msg = "Loading your transactions…"; void obLoad({}); }
+    els.obCount.textContent = msg;
+    els.obCutoffChange.hidden = loadState !== "live"; // "Change" needs a window to change
+  }
+
+  /** Wizard cutoff chip: same persistence as Settings, but the refetch happens right
+   *  away (there is no open deck to fight) — never through cutoffDirty. @param {string} id */
+  function obPickCutoff(id) {
+    if (id === cutoff) return;
+    cutoff = /** @type {import("./lib/lm.js").CutoffId} */ (id);
+    try { cutoffSave(id); } catch { storageFailed(); }
+    renderCutoffRow(els.obCutoffRow, els.obCutoffLine);
+    haptic(8);
+    void loadDeckQuiet({ force: true });
+  }
+
+  /** "Start sorting" / "Done": leave the wizard and put the deck on the table. */
+  async function obFinish() {
+    onboardCursorClear();
+    hideOnboarding();
+    if (loadInFlight) await loadInFlight; // tapped mid-load: let it land rather than double-fetch
+    if (loadState === "none" || stateError) { await replayIfNeeded(); await retryLoad(); return; }
+    dealSet();
+    dealAnim = true;
+    renderStack();
+    updateMeters();
+    backfillRuleNames();
+    maybeSuggestionToast();
+    ensureClassified();
+    updateWebBar();
+  }
+
+  /** Persist a token change (merge) and re-derive everything keyed on it. Returns
+   *  whether storage echoes the write — the wizard refuses to advance otherwise.
+   *  @param {{lm?: string|null, or?: string|null}} partial @returns {boolean} */
+  function onTokensChanged(partial) {
+    const prev = tokens;
+    try { setTokens(partial); } catch { storageFailed(); }
+    tokens = getTokens();
+    const echoed = (partial.lm === undefined || tokens.lm === (partial.lm || null))
+      && (partial.or === undefined || tokens.or === (partial.or || null));
+    if (partial.lm !== undefined) {
+      obDead.lm = false;
+      deadTokenNoted.delete("lm");
+      if (tokens.lm !== prev.lm) {
+        replayedFor = null; // the persisted queue must replay under the new token
+        fetchGen++; // and a fetch still paginating under the old one must not commit
+      }
+    }
+    if (partial.or !== undefined) {
+      obDead.or = false;
+      deadTokenNoted.delete("or");
+      orCreditNoted = false;
+      freeQuotaHit = null; // own key: the free quota no longer applies
+      updateUpgradeBanner();
+    }
+    updateWebBar();
+    return echoed;
+  }
+
+  /** Replay the persisted apply queue ONCE per LM token (boot, or a token change in
+   *  Settings / the wizard) — lib/sync.js owns the lock scope, the single membership
+   *  recheck, and poison isolation; app.js keeps only the UI routing. Items that had
+   *  live undo toasts at death are included (replay marks everything flushable).
+   *  Server-era items (snapshotTs null) replay through the same recheck.
+   *  @returns {Promise<void>} */
+  function replayIfNeeded() {
+    if (replayInFlight) return replayInFlight.then(() => replayIfNeeded()); // token may have changed meanwhile
+    if (!tokens.lm || replayedFor === tokens.lm) return Promise.resolve();
+    replayedFor = tokens.lm;
+    replayInFlight = replayRun(tokens.lm).finally(() => { replayInFlight = null; });
+    return replayInFlight;
+  }
+  /** @param {string} lmToken */
+  async function replayRun(lmToken) {
+    queue = queueLoad();
+    if (!queue.length) return;
+    bootReplaying = true; // flush() no-ops meanwhile — an `online` event mid-replay
+    // must not double-send the same items and mis-announce them as "already done"
+    try {
+      const res = await replayQueue(lmToken, {
+        onApplied: () => { queue = queueLoad(); updateConnUI(); }, // live chip count per chunk
+      });
+      queue = queueLoad(); // replay removed/parked items under its own lock; our refs are stale by design
+      rules = rulesLoad(); // make_rule absorption wrote through store.ruleAdd
+      noteConnOutcome("lm", null);
+      // sent:false skips are honest news (someone else — or another tab — got
+      // there first); sent:true skips are our own earlier sends, kept silent.
+      if (res.skippedUnsent.length) note(`${res.skippedUnsent.length} already categorized elsewhere ✓`);
+    } catch (e) {
+      queue = queueLoad(); // partial progress persisted before the throw
+      rules = rulesLoad();
+      noteConnOutcome("lm", e);
+      routeLMError(e); // unrouted failures stay quiet — the next flush/refresh retries
+    }
+    bootReplaying = false;
+    updateConnUI(); // stuck surface + chip recount after replay
   }
 
   // ---------- app badge ("remaining at last close", never background results) ----------
@@ -2137,7 +2727,7 @@ function main() {
   // ---------- service worker update flow ----------
   function maybeShowUpdateToast() {
     if (!updateReady || updateInitiated) return;
-    if (sheetOpenNow() || dragCtx) { updateToastPending = true; return; } // suppressed, resurfaces later
+    if (sheetOpenNow() || dragCtx || onboardingActive) { updateToastPending = true; return; } // suppressed, resurfaces later
     updateToastPending = false;
     els.updateToast.hidden = false;
   }
@@ -2387,11 +2977,17 @@ function main() {
    *  covers the 401 path.) Returns true if handled.
    *  @param {unknown} e */
   function routeLMError(e) {
+    if (isStaleErr(e)) return true; // superseded by a newer fetch — nothing to tell the user
     if (e instanceof Error && /** @type {Error & {noToken?: boolean}} */ (e).noToken) {
-      showOnboarding();
+      if (!onboardingActive) showOnboarding(); // the wizard is already collecting it otherwise
       return true;
     }
     if (e instanceof LMError && e.tokenInvalid) {
+      if (onboardingActive) {
+        // the wizard names it in place — no Settings, no once-per-session latch
+        if (!(obStep === "lm" && obDead.lm)) obGoto("lm", { dead: true });
+        return true;
+      }
       if (!deadTokenNoted.has("lm")) {
         deadTokenNoted.add("lm"); // once per session — don't reopen the sheet on every retry
         if (sheetOpenNow()) note("Lunch Money rejected the token — see Settings");
@@ -2405,6 +3001,10 @@ function main() {
   /** @param {unknown} e */
   function routeORError(e) {
     if (e instanceof ORError && e.tokenInvalid) {
+      if (onboardingActive) {
+        if (obSteps.includes("or") && !(obStep === "or" && obDead.or)) obGoto("or", { dead: true });
+        return true;
+      }
       if (!deadTokenNoted.has("or")) {
         deadTokenNoted.add("or");
         if (sheetOpenNow()) note("OpenRouter key stopped working — see Settings");
@@ -2435,6 +3035,7 @@ function main() {
     flush("hidden");
     // 3) badge = remaining at close; suggestion stamp = seen through this visit.
     //    Both LIVE only — a snapshot deck's counts describe stale data.
+    if (onboardingActive) return; // nothing dealt yet — the counts would describe a deck the user never saw
     if (badgeEnabled && loadState === "live") setBadge(set.length + backlog.length);
     if (loadState === "live") updateSugStamp();
   }
@@ -2449,7 +3050,7 @@ function main() {
       });
       maybeThresholdFlush();
     }
-    if (lastHiddenAt && Date.now() - lastHiddenAt > REFRESH_AWAY_MS) {
+    if (!onboardingActive && lastHiddenAt && Date.now() - lastHiddenAt > REFRESH_AWAY_MS) {
       // A resumed installed-PWA session counts as a fresh visit: re-arm the
       // "N suggestions ready" toast so cached results surface without a reload.
       sugToastShown = false;
@@ -2535,7 +3136,43 @@ function main() {
       const v = els.orTokenInput.value.trim();
       if (v) validateTokenField("or", v);
     });
-    els.onboardOpen.addEventListener("click", () => openSettingsSheet(null));
+    // ---- onboarding wizard
+    els.onboard.addEventListener("cancel", (e) => e.preventDefault()); // Esc must not dismiss setup
+    // Chrome's close watcher lets a repeated Esc bypass a cancelled `cancel`: reopen.
+    els.onboard.addEventListener("close", () => { if (onboardingActive && !els.onboard.open) els.onboard.showModal(); });
+    els.obNext.addEventListener("click", () => { void obContinue(); });
+    els.obBack.addEventListener("click", obBack);
+    els.obSecondary.addEventListener("click", obSecondaryTap);
+    els.obLmInput.addEventListener("input", () => obOnInput("lm"));
+    els.obOrInput.addEventListener("input", () => obOnInput("or"));
+    els.obLmInput.addEventListener("blur", () => obOnBlur("lm"));
+    els.obOrInput.addEventListener("blur", () => obOnBlur("or"));
+    els.obLmShow.addEventListener("click", () => obToggleShown("lm"));
+    els.obOrShow.addEventListener("click", () => obToggleShown("or"));
+    els.obAiGroup.addEventListener("change", (e) => {
+      const r = e.target instanceof HTMLInputElement ? e.target : null;
+      if (!r || r.name !== "obAi") return;
+      obChoice = r.value === "free" || r.value === "none" || r.value === "own"
+        ? /** @type {"free"|"none"|"own"} */ (r.value) : null;
+      obRender();
+      if (obChoice === "own") els.obOrInput.focus();
+    });
+    els.obCutoffChange.addEventListener("click", () => {
+      const show = els.obCutoffRow.hidden;
+      els.obCutoffRow.hidden = !show;
+      els.obCutoffLine.hidden = !show;
+      els.obCutoffChange.setAttribute("aria-expanded", String(show));
+    });
+    els.obCutoffRow.addEventListener("click", (e) => {
+      const b = e.target instanceof Element ? e.target.closest("[data-cutoff]") : null;
+      if (b instanceof HTMLElement && b.dataset.cutoff) obPickCutoff(b.dataset.cutoff);
+    });
+    els.onboard.addEventListener("keydown", (e) => {
+      // Enter in a token field = Continue (when enabled); radios keep their native keys
+      if (e.key !== "Enter" || !(e.target instanceof HTMLInputElement) || e.target.type === "radio") return;
+      e.preventDefault();
+      if (!els.obNext.disabled) void obContinue();
+    });
     els.updateBtn.addEventListener("click", applyUpdate);
     els.webBarBtn.addEventListener("click", () => {
       if (els.webBar.dataset.mode === "hint") { openSettingsSheet(null); return; }
@@ -2616,6 +3253,7 @@ function main() {
     els.menuRefresh.addEventListener("click", () => { closeMenu(); refresh(); });
 
     document.addEventListener("keydown", (e) => {
+      if (onboardingActive) return; // the dialog's own handler owns Enter; card shortcuts must not fire behind it
       if (sheetOpenNow()) {
         const sheet = pickerCtx ? els.pickSheet
           : els.laterSheet.hidden === false ? els.laterSheet
@@ -2660,6 +3298,18 @@ function main() {
 
     window.addEventListener("popstate", () => {
       if (ignoreNextPop) { ignoreNextPop = false; return; }
+      if (onboardingActive) {
+        // hardware back = wizard Back; on the first step the entry is spent and the
+        // wizard stays — the next back leaves the PWA, same as with no wizard
+        if (sheetHistoryDepth > 0) {
+          sheetHistoryDepth--;
+          if (prevStep(obSteps, obStep)) {
+            obBack();
+            try { history.pushState({ dopoOb: true }, ""); sheetHistoryDepth++; } catch { /* sandboxed */ }
+          }
+        }
+        return;
+      }
       if (sheetHistoryDepth > 0) {
         sheetHistoryDepth--; // consumed by the back button itself
         if (pickerCtx) resolvePicker(null);
@@ -2726,8 +3376,9 @@ function main() {
       await fetchState();
     } catch (e) {
       failure = e ?? new Error("Couldn't load");
-      if (!isNoTokenErr(e)) noteConnOutcome("lm", e);
+      if (!isNoTokenErr(e) && !isStaleErr(e)) noteConnOutcome("lm", e);
     }
+    if (isStaleErr(failure)) return; // superseded by a newer fetch, which owns the outcome — nothing to render
     if (failure !== null) {
       const e = failure;
       // Routed failures (no token / dead token) keep current behavior — onboarding
@@ -2752,7 +3403,6 @@ function main() {
       renderStack();
       return;
     }
-    if (onboardingActive) hideOnboarding(); // state loads fine now — the token works
     backfillRuleNames(); // names for rules created during boot replay (catById was empty)
     maybeSuggestionToast(); // "N suggestions ready" since last visit
     backlog = eligible(allTxns).sort(byConfDesc);
@@ -2780,43 +3430,20 @@ function main() {
     updateMeters();
     updateConnUI(); // last session's queue may already warrant the offline chip
 
-    if (!tokens.lm) showOnboarding();
-
-    // 1) replay the persisted queue first — lib/sync.js owns the lock scope, the
-    //    single membership recheck, and poison isolation; app.js keeps only the UI
-    //    routing. Items that had live undo toasts at death are included (replay
-    //    marks everything flushable). Server-era items (snapshotTs null) replay
-    //    through the same recheck.
-    if (queue.length && tokens.lm) {
-      bootReplaying = true; // flush() no-ops meanwhile — an `online` event mid-replay
-      // must not double-send the same items and mis-announce them as "already done"
-      try {
-        const res = await replayQueue(tokens.lm, {
-          onApplied: () => { queue = queueLoad(); updateConnUI(); }, // live chip count per chunk
-        });
-        queue = queueLoad(); // replay removed/parked items under its own lock; our refs are stale by design
-        rules = rulesLoad(); // make_rule absorption wrote through store.ruleAdd
-        noteConnOutcome("lm", null);
-        // sent:false skips are honest news (someone else — or another tab — got
-        // there first); sent:true skips are our own earlier sends, kept silent.
-        if (res.skippedUnsent.length) note(`${res.skippedUnsent.length} already categorized elsewhere ✓`);
-      } catch (e) {
-        queue = queueLoad(); // partial progress persisted before the throw
-        rules = rulesLoad();
-        noteConnOutcome("lm", e);
-        routeLMError(e); // unrouted failures stay quiet — the next flush/refresh retries
-      }
-      bootReplaying = false;
-      updateConnUI(); // stuck surface + chip recount after replay
+    // The wizard runs for a first visit (no LM token) and for an interrupted setup
+    // (cursor). It triggers the queue replay and the first fetch from its own steps;
+    // the plain boot does 1) replay, 2) fetch state, 3) deal.
+    if (!tokens.lm || onboardCursorLoad()) {
+      showOnboarding();
+    } else {
+      await replayIfNeeded();
+      await retryLoad();
     }
-
-    // 2) fetch state, 3) deal
-    await retryLoad();
 
     setInterval(() => {
       // KEEPS RUNNING while offline — this interval and onVisible are the recovery
       // probes; the unreliable `online` event must never be the only way back.
-      if (!document.hidden && !sheetOpenNow() && !dragCtx) refresh();
+      if (!document.hidden && !sheetOpenNow() && !dragCtx && !onboardingActive) refresh();
     }, REFRESH_EVERY_MS);
   }
 

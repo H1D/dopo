@@ -980,30 +980,215 @@ body.quaking > .actions {
 }
 .save-btn:disabled { opacity: .6; }
 
-/* ---------- onboarding (not_registered) ---------- */
+/* ---------- onboarding wizard ---------- */
 
-.onboard {
-  position: fixed;
-  inset: 0;
-  z-index: 55; /* below sheets (70+) so Settings opens on top, below toasts (60+) */
+dialog.onboard {
+  margin: 0;
+  border: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background: var(--card);
+  color: var(--ink);
+  width: 100dvw;
+  height: 100dvh;
+  max-width: 100dvw;
+  max-height: 100dvh;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+dialog.onboard::backdrop { background: var(--bg); }
+dialog.onboard:not([open]) { display: none; }
+
+@media (min-width: 600px) {
+  dialog.onboard {
+    width: 100%;
+    max-width: 420px;
+    height: auto;
+    max-height: min(88dvh, 640px);
+    margin: auto;
+    padding: 0;
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lift);
+  }
+}
+
+.onboard-progress {
   display: flex;
   align-items: center;
-  justify-content: center;
-  background: var(--bg);
-  padding: 24px;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px 20px 6px;
+  flex-shrink: 0;
 }
-.onboard-card { text-align: center; max-width: 340px; }
-.onboard-emoji { font-size: 56px; }
-.onboard-card h2 { margin: 12px 0 8px; }
-.onboard-card p { color: var(--muted); }
-.onboard-card button {
-  margin-top: 16px;
+.onboard-progress #obStepLabel {
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+}
+.onboard-dots { display: flex; gap: 6px; }
+.onboard-dots .dot { width: 7px; height: 7px; border-radius: 999px; background: var(--line); }
+.onboard-dots .dot.on { background: var(--accent); }
+
+.onboard-body {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 20px 20px;
+}
+
+.ob-title { font-size: 21px; font-weight: 800; margin: 4px 0 10px; outline: none; }
+.onboard-step p { color: var(--muted); margin: 0 0 10px; line-height: 1.5; }
+.ob-warn { color: var(--warn); font-weight: 600; font-size: 13px; }
+
+.ob-steps {
+  color: var(--muted);
+  font-size: 14px;
+  margin: 0 0 14px;
+  padding-left: 22px;
+}
+.ob-steps li { margin-bottom: 6px; }
+.ob-steps a { color: var(--accent); font-weight: 700; text-decoration: none; }
+.ob-steps a:hover { text-decoration: underline; }
+
+#obAiGroup { margin-bottom: 6px; }
+
+/* radio cards: input is visually hidden but stays focusable, so the label
+   is the whole hit target and :has()/:focus-within drive the highlight */
+.ob-choice {
+  display: block;
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  cursor: pointer;
+}
+.ob-choice:has(input:checked) { border-color: var(--accent); background: var(--accent-bg); }
+.ob-choice:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ob-choice input[type="radio"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.ob-choice-title { font-weight: 800; }
+.ob-choice-lead { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.ob-choice-bullets { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
+.ob-choice-bullets li { margin-bottom: 2px; }
+
+.field-input-row { display: flex; gap: 8px; align-items: center; }
+.field-input-row .field-input { flex: 1; }
+.field-show {
+  flex-shrink: 0;
+  min-height: 44px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--bg);
+}
+.field-show[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+
+.ob-gestures { list-style: none; margin: 0 0 16px; padding: 0; }
+.ob-gestures li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  color: var(--ink);
+}
+.ob-gestures li:last-child { border-bottom: none; }
+.ob-gesture-emoji { font-size: 18px; width: 24px; text-align: center; flex-shrink: 0; }
+.ob-gestures kbd {
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+.ob-cutoff-change {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px; /* same tap target as every other control in the dialog */
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 13px;
+  padding: 0 8px;
+  margin: -8px 0 4px;
+}
+.ob-cutoff-line { padding: 6px 8px 0; }
+
+.onboard-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 20px calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.ob-back {
+  color: var(--muted);
+  font-weight: 700;
+  padding: 10px 4px;
+  min-height: 44px;
+}
+#obNote {
+  flex: 1 1 100%;
+  order: -1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 0 0 4px;
+}
+#obNote:empty { display: none; }
+.ob-secondary {
+  color: var(--muted);
+  font-weight: 700;
+  background: none;
+  padding: 10px 14px;
+  min-height: 44px;
+  margin-left: auto;
+}
+.ob-primary {
   background: var(--accent);
   color: var(--accent-ink);
   font-weight: 800;
-  border-radius: 14px;
-  padding: 14px 30px;
   font-size: 16px;
+  border-radius: 14px;
+  padding: 14px 24px;
+  min-height: 44px;
+  flex: 1 1 auto;
+  min-width: 140px;
+  margin-left: auto;
+}
+.ob-primary:disabled { opacity: .6; }
+.ob-back:not([hidden]) ~ .ob-primary,
+.ob-back:not([hidden]) ~ .ob-secondary ~ .ob-primary { margin-left: 0; }
+
+/* transition when switching panels; killed under reduced motion */
+@keyframes ob-enter {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.ob-enter { animation: ob-enter .28s var(--spring); }
+@media (prefers-reduced-motion: reduce) {
+  .ob-enter { animation: none; }
 }
 
 /* ---------- "New version" update toast ---------- */
@@ -1125,18 +1310,6 @@ body.quaking > .actions {
   border-color: var(--out-red);
   background: color-mix(in srgb, var(--out-red) 12%, transparent);
 }
-
-/* onboarding steps (token links) */
-.onboard-steps {
-  text-align: left;
-  color: var(--muted);
-  font-size: 14px;
-  margin: 14px 0 0;
-  padding-left: 22px;
-}
-.onboard-steps li { margin-bottom: 8px; }
-.onboard-steps a { color: var(--accent); font-weight: 700; text-decoration: none; }
-.onboard-steps a:hover { text-decoration: underline; }
 
 /* floating web-check / OpenRouter-hint bar above the action buttons */
 .webbar {

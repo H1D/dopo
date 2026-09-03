@@ -46,6 +46,7 @@ const PRECACHE = [
   "lib/clean.js",
   "lib/dust.js",
   "lib/music.js",
+  "lib/onboard.js",
   "lib/sfx.js",
   "lib/shuffle.js",
   "lib/store.js",

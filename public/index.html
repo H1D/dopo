@@ -115,7 +115,7 @@
         <a href="https://my.lunchmoney.app/developers" target="_blank" rel="noopener">my.lunchmoney.app/developers</a>
         — it has full account access, treat it like a bank password.</div>
       <div class="field-hint" id="lmTokenHint" hidden></div>
-      <div class="field-error" id="lmTokenError" hidden></div>
+      <div class="field-error" id="lmTokenError" role="status" hidden></div>
     </div>
     <div class="field">
       <label class="field-label" for="orTokenInput">OpenRouter API key</label>
@@ -125,7 +125,7 @@
         what they see. Your own key lifts all of that: create a dedicated one with a spend limit at
         <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</div>
       <div class="field-hint" id="orTokenHint" hidden></div>
-      <div class="field-error" id="orTokenError" hidden></div>
+      <div class="field-error" id="orTokenError" role="status" hidden></div>
     </div>
     <div class="settings-info" id="budgetLine" hidden></div>
     <div class="settings-info" id="webCheckLine" hidden></div>
@@ -165,21 +165,90 @@
   </div>
 </div>
 
-<div class="onboard" id="onboardCard" hidden>
-  <div class="onboard-card">
-    <div class="onboard-emoji">🔌</div>
-    <h2>Connect Lunch Money</h2>
-    <p>dopo sorts your Lunch Money transactions right here in the browser. Your tokens stay
-      on this device and go only to Lunch Money and OpenRouter — there is no server.</p>
-    <ol class="onboard-steps">
-      <li>Create a <a href="https://my.lunchmoney.app/developers" target="_blank" rel="noopener">Lunch&nbsp;Money API token</a> (required).</li>
-      <li>Optionally create an <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">OpenRouter key</a> — use a dedicated key with a spend limit. Without one you get a shared free model with a daily quota and no web checks.</li>
-    </ol>
-    <p class="onboard-offline">You'll need to be online this first time — after that, dopo keeps
-      working offline and syncs your sorting when you're back.</p>
-    <button id="onboardOpen">Paste tokens</button>
+<dialog id="onboard" class="onboard" aria-labelledby="obTitleWelcome">
+  <div class="onboard-progress">
+    <span id="obStepLabel">Step 1 of 4</span>
+    <div class="onboard-dots" id="obDots"></div>
   </div>
-</div>
+
+  <div class="onboard-body">
+
+    <section class="onboard-step" data-step="welcome">
+      <h2 class="ob-title" id="obTitleWelcome" tabindex="-1">Welcome to dopo</h2>
+      <p>dopo shows you your uncategorized Lunch Money transactions one at a time, so you can
+        sort them with a swipe, a tap, or the keyboard instead of digging through a spreadsheet.</p>
+      <p>There's no dopo server. Your tokens stay on this device and go only to Lunch Money
+        and OpenRouter — you'll choose your AI options on the next screens.</p>
+      <p class="ob-offline">You'll need to be online for this first step. After that, dopo
+        keeps working offline and catches up when you're back.</p>
+    </section>
+
+    <section class="onboard-step" data-step="lm" hidden>
+      <h2 class="ob-title" id="obTitleLm" tabindex="-1">Connect Lunch Money</h2>
+      <ol class="ob-steps">
+        <li>Open your <a href="https://my.lunchmoney.app/developers" target="_blank" rel="noopener">Lunch Money developer page</a>.</li>
+        <li>Select "Request new access token".</li>
+        <li>Copy the token it shows you.</li>
+      </ol>
+      <div class="field">
+        <label class="field-label" for="obLmInput">Lunch Money API token</label>
+        <div class="field-input-row">
+          <input class="field-input" id="obLmInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste token" aria-describedby="obLmHint obLmError">
+          <button type="button" class="field-show" id="obLmShow" aria-pressed="false">Show</button>
+        </div>
+        <div class="field-hint" id="obLmHint" role="status" hidden></div>
+        <div class="field-error" id="obLmError" role="status" hidden></div>
+      </div>
+      <p class="ob-warn">This token can see and change everything in your Lunch Money account —
+        keep it as safe as a bank password, and don't share it.</p>
+    </section>
+
+    <section class="onboard-step" data-step="or" hidden>
+      <h2 class="ob-title" id="obTitleOr" tabindex="-1">Choose an AI helper</h2>
+      <p>dopo can suggest a category for each transaction. Pick how you want that to work —
+        you can always change this later in Settings.</p>
+      <div id="obAiGroup" role="radiogroup" aria-labelledby="obTitleOr"></div>
+      <div id="obOrField" hidden>
+        <div class="field">
+          <label class="field-label" for="obOrInput">OpenRouter API key</label>
+          <div class="field-input-row">
+            <input class="field-input" id="obOrInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste key" aria-describedby="obOrHint obOrError">
+            <button type="button" class="field-show" id="obOrShow" aria-pressed="false">Show</button>
+          </div>
+          <div class="field-hint" id="obOrHint" role="status" hidden></div>
+          <div class="field-error" id="obOrError" role="status" hidden></div>
+        </div>
+        <p class="field-sub">Create a dedicated key with a spend limit at
+          <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</p>
+        <p class="field-sub">Costs about $0.06 per 500 transactions, plus $0.0075 each time dopo
+          double-checks a merchant on the web (up to 15 checks a session).</p>
+      </div>
+    </section>
+
+    <section class="onboard-step" data-step="done" hidden>
+      <h2 class="ob-title" id="obTitleDone" tabindex="-1">You're all set</h2>
+      <p>Here's how sorting works:</p>
+      <ul class="ob-gestures">
+        <li><span class="ob-gesture-emoji" aria-hidden="true">✓</span> Swipe right or press <kbd>→</kbd> to sort it</li>
+        <li><span class="ob-gesture-emoji" aria-hidden="true">💤</span> Swipe left or press <kbd>←</kbd> to save it for later</li>
+        <li><span class="ob-gesture-emoji" aria-hidden="true">🗂</span> Tap the card or press <kbd>Enter</kbd> to pick a category</li>
+        <li><span class="ob-gesture-emoji" aria-hidden="true">↺</span> Press <kbd>U</kbd> any time to undo</li>
+      </ul>
+      <p id="obCount" role="status">Loading your transactions…</p>
+      <button type="button" class="ob-cutoff-change" id="obCutoffChange" aria-controls="obCutoffRow" hidden>Change</button>
+      <div class="cutoff-row" id="obCutoffRow" role="group" aria-label="How far back to sort" hidden></div>
+      <p class="settings-info ob-cutoff-line" id="obCutoffLine" hidden></p>
+    </section>
+
+  </div>
+
+  <footer class="onboard-footer">
+    <button type="button" class="ob-back" id="obBack" hidden>Back</button>
+    <p id="obNote" role="status" aria-live="polite"></p>
+    <button type="button" class="ob-secondary" id="obSecondary" hidden></button>
+    <button type="button" class="ob-primary" id="obNext">Continue</button>
+  </footer>
+</dialog>
 
 <div class="update-toast" id="updateToast" hidden>
   <span>New version</span>
