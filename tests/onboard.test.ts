@@ -144,21 +144,21 @@ describe("nextFieldState", () => {
 // ---------------------------------------------------------------------------
 
 describe("canAdvance", () => {
-  const steps4 = stepsFor({});
+  const firstRun = stepsFor({});
 
   test("welcome: always continuable, primary is Connect Lunch Money, no Back", () => {
-    const a = canAdvance({ stepId: "welcome", steps: steps4, field: FIELD_IDLE, saved: false, choice: null, returning: false });
+    const a = canAdvance({ stepId: "welcome", steps: firstRun, field: FIELD_IDLE, saved: false, choice: null, returning: false });
     expect(a).toEqual({ canContinue: true, primary: "Connect Lunch Money", secondary: null, showBack: false, checkFirst: false });
   });
 
   test("lm: empty field, nothing saved -> cannot continue", () => {
-    const a = canAdvance({ stepId: "lm", steps: steps4, field: FIELD_IDLE, saved: false, choice: null, returning: false });
+    const a = canAdvance({ stepId: "lm", steps: firstRun, field: FIELD_IDLE, saved: false, choice: null, returning: false });
     expect(a.canContinue).toBe(false);
     expect(a.showBack).toBe(true); // lm is index 1
   });
 
   test("Back-after-save: lm step with an EMPTY field but a saved token -> can continue, no re-check", () => {
-    const a = canAdvance({ stepId: "lm", steps: steps4, field: FIELD_IDLE, saved: true, choice: null, returning: false });
+    const a = canAdvance({ stepId: "lm", steps: firstRun, field: FIELD_IDLE, saved: true, choice: null, returning: false });
     expect(a.canContinue).toBe(true);
     expect(a.checkFirst).toBe(false);
   });
@@ -166,7 +166,7 @@ describe("canAdvance", () => {
   test("lm: non-empty, unchecked field -> continuable but must check first", () => {
     const a = canAdvance({
       stepId: "lm",
-      steps: steps4,
+      steps: firstRun,
       field: { status: "idle", value: "sk-lm-1" },
       saved: false,
       choice: null,
@@ -177,64 +177,64 @@ describe("canAdvance", () => {
   });
 
   test("lm: ok or armed field -> continuable, no re-check needed", () => {
-    const ok = canAdvance({ stepId: "lm", steps: steps4, field: { status: "ok", value: "tok" }, saved: false, choice: null, returning: false });
+    const ok = canAdvance({ stepId: "lm", steps: firstRun, field: { status: "ok", value: "tok" }, saved: false, choice: null, returning: false });
     expect(ok.canContinue).toBe(true);
     expect(ok.checkFirst).toBe(false);
-    const armed = canAdvance({ stepId: "lm", steps: steps4, field: { status: "armed", value: "tok" }, saved: false, choice: null, returning: false });
+    const armed = canAdvance({ stepId: "lm", steps: firstRun, field: { status: "armed", value: "tok" }, saved: false, choice: null, returning: false });
     expect(armed.canContinue).toBe(true);
     expect(armed.checkFirst).toBe(false);
   });
 
   test("lm: checking -> cannot continue, label 'Checking…'", () => {
-    const a = canAdvance({ stepId: "lm", steps: steps4, field: { status: "checking", value: "tok" }, saved: false, choice: null, returning: false });
+    const a = canAdvance({ stepId: "lm", steps: firstRun, field: { status: "checking", value: "tok" }, saved: false, choice: null, returning: false });
     expect(a.canContinue).toBe(false);
     expect(a.primary).toBe("Checking…");
   });
 
   test("lm: netfail -> primary 'Try again', secondary 'Continue anyway', continuable via the escape hatch", () => {
-    const a = canAdvance({ stepId: "lm", steps: steps4, field: { status: "netfail", value: "tok" }, saved: false, choice: null, returning: false });
+    const a = canAdvance({ stepId: "lm", steps: firstRun, field: { status: "netfail", value: "tok" }, saved: false, choice: null, returning: false });
     expect(a.primary).toBe("Try again");
     expect(a.secondary).toBe("Continue anyway");
     expect(a.canContinue).toBe(true);
   });
 
   test("lm: netfail on an EMPTY field (offline step entry) -> nothing to try or continue with until pasted", () => {
-    const a = canAdvance({ stepId: "lm", steps: steps4, field: { status: "netfail", value: "" }, saved: false, choice: null, returning: false });
+    const a = canAdvance({ stepId: "lm", steps: firstRun, field: { status: "netfail", value: "" }, saved: false, choice: null, returning: false });
     expect(a.canContinue).toBe(false);
     expect(a.secondary).toBeNull();
     expect(a.checkFirst).toBe(false);
-    const b = canAdvance({ stepId: "lm", steps: steps4, field: { status: "netfail", value: "" }, saved: true, choice: null, returning: false });
+    const b = canAdvance({ stepId: "lm", steps: firstRun, field: { status: "netfail", value: "" }, saved: true, choice: null, returning: false });
     expect(b.canContinue).toBe(true); // Back-after-save while offline: the saved token carries
   });
 
   test("tune: always continuable with the plain Continue label", () => {
-    const a = canAdvance({ stepId: "tune", steps: steps4, field: FIELD_IDLE, saved: false, choice: null, returning: false });
+    const a = canAdvance({ stepId: "tune", steps: firstRun, field: FIELD_IDLE, saved: false, choice: null, returning: false });
     expect(a).toEqual({ canContinue: true, primary: "Continue", secondary: null, showBack: true, checkFirst: false });
   });
 
   test("or: choice null -> cannot continue regardless of field state", () => {
-    const a = canAdvance({ stepId: "or", steps: steps4, field: FIELD_IDLE, saved: false, choice: null, returning: false });
+    const a = canAdvance({ stepId: "or", steps: firstRun, field: FIELD_IDLE, saved: false, choice: null, returning: false });
     expect(a.canContinue).toBe(false);
   });
 
   test("or: free or none choice -> always continuable, no field involved", () => {
-    const free = canAdvance({ stepId: "or", steps: steps4, field: FIELD_IDLE, saved: false, choice: "free", returning: false });
+    const free = canAdvance({ stepId: "or", steps: firstRun, field: FIELD_IDLE, saved: false, choice: "free", returning: false });
     expect(free.canContinue).toBe(true);
-    const none = canAdvance({ stepId: "or", steps: steps4, field: FIELD_IDLE, saved: false, choice: "none", returning: false });
+    const none = canAdvance({ stepId: "or", steps: firstRun, field: FIELD_IDLE, saved: false, choice: "none", returning: false });
     expect(none.canContinue).toBe(true);
   });
 
   test("or: own choice mirrors the lm field rules", () => {
-    const empty = canAdvance({ stepId: "or", steps: steps4, field: FIELD_IDLE, saved: false, choice: "own", returning: false });
+    const empty = canAdvance({ stepId: "or", steps: firstRun, field: FIELD_IDLE, saved: false, choice: "own", returning: false });
     expect(empty.canContinue).toBe(false);
 
-    const savedEmpty = canAdvance({ stepId: "or", steps: steps4, field: FIELD_IDLE, saved: true, choice: "own", returning: false });
+    const savedEmpty = canAdvance({ stepId: "or", steps: firstRun, field: FIELD_IDLE, saved: true, choice: "own", returning: false });
     expect(savedEmpty.canContinue).toBe(true);
     expect(savedEmpty.checkFirst).toBe(false);
 
     const netfail = canAdvance({
       stepId: "or",
-      steps: steps4,
+      steps: firstRun,
       field: { status: "netfail", value: "or-tok" },
       saved: false,
       choice: "own",
@@ -262,18 +262,18 @@ describe("canAdvance", () => {
     const lastOr = canAdvance({ stepId: "or", steps: returningSteps, field: FIELD_IDLE, saved: false, choice: "none", returning: true });
     expect(lastOr.primary).toBe("Done");
 
-    const done = canAdvance({ stepId: "done", steps: steps4, field: FIELD_IDLE, saved: false, choice: null, returning: false });
+    const done = canAdvance({ stepId: "done", steps: firstRun, field: FIELD_IDLE, saved: false, choice: null, returning: false });
     expect(done.primary).toBe("Start sorting");
   });
 
   test("non-last steps keep the plain 'Continue' label", () => {
-    const a = canAdvance({ stepId: "or", steps: steps4, field: FIELD_IDLE, saved: false, choice: "free", returning: false });
+    const a = canAdvance({ stepId: "or", steps: firstRun, field: FIELD_IDLE, saved: false, choice: "free", returning: false });
     expect(a.primary).toBe("Continue");
   });
 
   test("showBack is false only on the first step of the active sequence", () => {
-    expect(canAdvance({ stepId: "welcome", steps: steps4, field: FIELD_IDLE, saved: false, choice: null, returning: false }).showBack).toBe(false);
-    expect(canAdvance({ stepId: "lm", steps: steps4, field: FIELD_IDLE, saved: false, choice: null, returning: false }).showBack).toBe(true);
+    expect(canAdvance({ stepId: "welcome", steps: firstRun, field: FIELD_IDLE, saved: false, choice: null, returning: false }).showBack).toBe(false);
+    expect(canAdvance({ stepId: "lm", steps: firstRun, field: FIELD_IDLE, saved: false, choice: null, returning: false }).showBack).toBe(true);
 
     const returningSteps = stepsFor({ returning: true, hasFreeTier: false }); // ["lm"] — lm is first here
     expect(canAdvance({ stepId: "lm", steps: returningSteps, field: FIELD_IDLE, saved: false, choice: null, returning: true }).showBack).toBe(false);

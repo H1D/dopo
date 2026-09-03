@@ -368,7 +368,7 @@ function main() {
     obLmInput: $input("#obLmInput"), obLmShow: $btn("#obLmShow"), obLmHint: $el("#obLmHint"), obLmError: $el("#obLmError"),
     obAiGroup: $el("#obAiGroup"), obOrField: $el("#obOrField"),
     obOrInput: $input("#obOrInput"), obOrShow: $btn("#obOrShow"), obOrHint: $el("#obOrHint"), obOrError: $el("#obOrError"),
-    obCount: $el("#obCount"), obCutoffRow: $el("#obCutoffRow"), obCutoffLine: $el("#obCutoffLine"),
+    obCount: $el("#obCount"), obCutoffRow: $el("#obCutoffRow"),
     obNote: $el("#obNote"), obBack: $btn("#obBack"), obSecondary: $btn("#obSecondary"), obNext: $btn("#obNext"),
     webBar: $el("#webBar"), webBarBtn: $btn("#webBarBtn"),
     connChip: $el("#connChip"), staleBanner: $el("#staleBanner"), stuckBanner: $btn("#stuckBanner"),
@@ -765,7 +765,7 @@ function main() {
     try { await flush("online"); } catch { /* flush routes/backs off internally */ }
     if (onboardingActive) {
       pendingSheetResync = true; // re-armed when the wizard closes
-      if (obStep === "tune" && loadState !== "live") void obLoad({}); // "loads when you reconnect"
+      if ((obStep === "tune" || obStep === "done") && loadState !== "live") void obLoad({}); // "loads when you reconnect"
       const w = obFieldOf();
       if (w && obField[w].status === "netfail" && obField[w].value) void obValidate(w); // "checks it when you reconnect"
       return;
@@ -1897,14 +1897,15 @@ function main() {
   }
 
   // ---------- settings: deck cutoff ----------
-  /** Chips + "from <date>" line; Settings and the wizard's done step share it.
+  /** Chips + optional "from <date>" line; Settings and the wizard's tune step share it.
    *  @param {HTMLElement} [container] @param {HTMLElement} [lineEl] */
-  function renderCutoffRow(container = els.cutoffRow, lineEl = els.cutoffLine) {
+  function renderCutoffRow(container = els.cutoffRow, /** @type {HTMLElement|null} */ lineEl = els.cutoffLine) {
     const btnHtml = (/** @type {{id: string, label: string}} */ p) =>
       `<button type="button" class="cutoff-chip${p.id === cutoff ? " on" : ""}"
         data-cutoff="${esc(p.id)}" aria-pressed="${p.id === cutoff ? "true" : "false"}">${esc(p.label)}</button>`;
     const chipsHtml = CUTOFF_PRESETS.map(btnHtml).join("");
     container.innerHTML = chipsHtml;
+    if (!lineEl) return; // the wizard's count line names the start date itself
     const { startDate } = fetchWindow();
     lineEl.textContent = `Showing transactions from ${fmtTxnDate(startDate)} onwards.`;
   }
@@ -2264,6 +2265,14 @@ function main() {
     obShowPanel(id);
     obRender();
     if (id === "tune") obRenderTune();
+    if (id === "done") {
+      // the sound toggles live here; paint the truth (a cursor resume must not show an
+      // unchecked box for music that is actually on), and keep the quiet preload the
+      // tune step would have kicked — a resume can land here directly
+      els.obMusicToggle.checked = audioPrefs.music;
+      els.obSfxToggle.checked = audioPrefs.sfx;
+      if (loadState !== "live" && !loadInFlight && !stateError) void obLoad({});
+    }
   }
 
   function obBack() {
@@ -2513,7 +2522,7 @@ function main() {
         if (!onTokensChanged({ or: null })) { note("Couldn't update the key — this device's storage may be full", 5000); return; }
       }
       const n = nextStep(obSteps, step);
-      if (step === "or" && n) void obLoad({}); // the done step wants the count; a last step loads via obFinish
+      if (step === "or" && n) void obLoad({}); // the tune step wants the count; a last step loads via obFinish
       if (n) obGoto(n); else void obFinish();
     } finally {
       obContinuing = false;
@@ -2529,7 +2538,7 @@ function main() {
     void obContinue();
   }
 
-  /** The AI step's Continue and the done step's own kick-off: replay the queue
+  /** The AI step's Continue and the tune step's own kick-off: replay the queue
    *  under the (possibly new) token, then fetch the deck quietly.
    *  @param {{force?: boolean}} opts */
   async function obLoad(opts) {
@@ -2539,7 +2548,7 @@ function main() {
   }
 
   /** Wizard-side deck fetch: state only — no deal, no animation, no classify; the
-   *  done step repaints its count line from the outcome. One in flight at a time,
+   *  tune step repaints its count line from the outcome. One in flight at a time,
    *  and a second live fetch only on `force` (cutoff change).
    *  @param {{force?: boolean}} [opts] @returns {Promise<void>} */
   function loadDeckQuiet(opts = {}) {
@@ -2573,13 +2582,11 @@ function main() {
     return loadInFlight;
   }
 
-  /** Done step: live count line + cutoff chips. Starts the load itself when
+  /** Tune step: live count line + cutoff chips. Starts the load itself when
    *  nothing is loaded yet (cursor resume lands here directly). */
   function obRenderTune() {
     if (!onboardingActive || obStep !== "tune") return;
-    renderCutoffRow(els.obCutoffRow, els.obCutoffLine);
-    els.obMusicToggle.checked = audioPrefs.music;
-    els.obSfxToggle.checked = audioPrefs.sfx;
+    renderCutoffRow(els.obCutoffRow, null);
     let msg;
     if (loadInFlight) msg = "Loading your transactions…";
     else if (loadState === "live" && !stateError) {
@@ -2589,7 +2596,6 @@ function main() {
     else if (stateError) msg = "Couldn't load yet — dopo retries when you start.";
     else { msg = "Loading your transactions…"; void obLoad({}); }
     els.obCount.textContent = msg;
-    els.obCutoffLine.hidden = true; // the count line already names the start date
   }
 
   /** Wizard cutoff chip: same persistence as Settings, but the refetch happens right
@@ -2598,9 +2604,9 @@ function main() {
     if (id === cutoff) return;
     cutoff = /** @type {import("./lib/lm.js").CutoffId} */ (id);
     try { cutoffSave(id); } catch { storageFailed(); }
-    renderCutoffRow(els.obCutoffRow, els.obCutoffLine);
+    renderCutoffRow(els.obCutoffRow, null);
     haptic(8);
-    void loadDeckQuiet({ force: true });
+    void obLoad({ force: true }); // replay-before-fetch, like every other wizard load
   }
 
   /** "Start sorting" / "Done": leave the wizard and put the deck on the table. */

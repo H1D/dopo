@@ -218,23 +218,33 @@
           <div class="field-hint" id="obOrHint" role="status" hidden></div>
           <div class="field-error" id="obOrError" role="status" hidden></div>
         </div>
-        <p class="field-sub">Takes about 3 minutes:</p>
+        <p class="field-sub">How to get one:</p>
         <ol class="ob-steps">
           <li>Sign up at <a href="https://openrouter.ai" target="_blank" rel="noopener">openrouter.ai</a> and add a few dollars of credit — that covers months of sorting.</li>
           <li>Open <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>, choose "Create API key", and set a spend limit so the worst case is bounded.</li>
           <li>Copy the key and paste it above.</li>
         </ol>
-        <p class="field-sub">Costs about $0.06 per 500 transactions, plus $0.0075 each time dopo
-          double-checks a merchant on the web (up to 15 checks a session).</p>
       </div>
     </section>
 
     <section class="onboard-step" data-step="tune" hidden>
-      <h2 class="ob-title" id="obTitleTune" tabindex="-1">Set it up your way</h2>
+      <h2 class="ob-title" id="obTitleTune" tabindex="-1">How far back?</h2>
       <h3 class="ob-subtitle" id="obCutoffLabel">Include transactions for</h3>
       <div class="cutoff-row" id="obCutoffRow" role="group" aria-labelledby="obCutoffLabel"></div>
-      <p class="settings-info ob-cutoff-line" id="obCutoffLine" hidden></p>
       <p id="obCount" role="status">Loading your transactions…</p>
+      <p class="ob-sub">Older transactions stay uncategorized in Lunch Money until you widen this — you can
+        change it any time in Settings.</p>
+    </section>
+
+    <section class="onboard-step" data-step="done" hidden>
+      <h2 class="ob-title" id="obTitleDone" tabindex="-1">You're all set</h2>
+      <p>Here's how sorting works:</p>
+      <ul class="ob-gestures">
+        <li><span class="ob-gesture-emoji" aria-hidden="true">✓</span> Swipe right or press <kbd>→</kbd> to sort it</li>
+        <li><span class="ob-gesture-emoji" aria-hidden="true">💤</span> Swipe left or press <kbd>←</kbd> to save it for later</li>
+        <li><span class="ob-gesture-emoji" aria-hidden="true">🗂</span> Tap the card or press <kbd>Enter</kbd> to pick a category</li>
+        <li><span class="ob-gesture-emoji" aria-hidden="true">↺</span> Press <kbd>U</kbd> any time to undo</li>
+      </ul>
       <h3 class="ob-subtitle">Make it fun</h3>
       <p>dopo is short for <b>dopamine-driven</b>: sorting should feel like a game, not a chore.
         Sound is a big part of that — try it on.</p>
@@ -250,19 +260,6 @@
           <span class="toggle-sub">Bleeps on swipes, thuds on landings, a fanfare at inbox zero.</span>
         </span>
       </label>
-    </section>
-
-    <section class="onboard-step" data-step="done" hidden>
-      <h2 class="ob-title" id="obTitleDone" tabindex="-1">You're all set</h2>
-      <p>Here's how sorting works:</p>
-      <ul class="ob-gestures">
-        <li><span class="ob-gesture-emoji" aria-hidden="true">✓</span> Swipe right or press <kbd>→</kbd> to sort it</li>
-        <li><span class="ob-gesture-emoji" aria-hidden="true">💤</span> Swipe left or press <kbd>←</kbd> to save it for later</li>
-        <li><span class="ob-gesture-emoji" aria-hidden="true">🗂</span> Tap the card or press <kbd>Enter</kbd> to pick a category</li>
-        <li><span class="ob-gesture-emoji" aria-hidden="true">↺</span> Press <kbd>U</kbd> any time to undo</li>
-      </ul>
-      <p>Everything you sort syncs to Lunch Money straight away — and keeps syncing when you're
-        back online if you sort offline.</p>
     </section>
 
   </div>

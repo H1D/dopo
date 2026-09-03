@@ -1121,9 +1121,10 @@ dialog.onboard:not([open]) { display: none; }
   padding: 2px 6px;
 }
 
-.ob-cutoff-line { padding: 6px 8px 0; }
 .ob-subtitle { font-size: 15px; font-weight: 800; margin: 14px 0 4px; }
-.onboard-step .toggle-row { padding-left: 0; padding-right: 0; }
+.ob-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.onboard-step .toggle-row { padding: 6px 0; } /* tighter than Settings: the legend shares the screen */
+.onboard-step .ob-gestures { margin-bottom: 8px; }
 
 .onboard-footer {
   display: flex;
