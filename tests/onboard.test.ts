@@ -278,24 +278,26 @@ describe("canAdvance", () => {
 // ---------------------------------------------------------------------------
 
 describe("orChoices", () => {
-  test("hasFreeTier=true: free + own, nothing pre-selected in the shape itself", () => {
+  test("hasFreeTier=true: own first (recommended), then free", () => {
     const choices = orChoices(true);
-    expect(choices.map((c) => c.id)).toEqual(["free", "own"]);
-    const free = choices[0]!;
+    expect(choices.map((c) => c.id)).toEqual(["own", "free"]);
+    const free = choices[1]!;
     expect(free.title).toBeTruthy();
     expect(free.lead).toBeTruthy();
     expect(free.bullets.length).toBe(5);
   });
 
-  test("hasFreeTier=false: none + own", () => {
+  test("hasFreeTier=false: own first, then none", () => {
     const choices = orChoices(false);
-    expect(choices.map((c) => c.id)).toEqual(["none", "own"]);
-    const none = choices[0]!;
+    expect(choices.map((c) => c.id)).toEqual(["own", "none"]);
+    const none = choices[1]!;
     expect(none.bullets).toEqual([]);
   });
 
-  test("own card: bullets include the per-500 cost line and the spend-limit advice", () => {
+  test("own card: setup-time lead, where-to-get-it bullet, cost line and spend-limit advice", () => {
     const own = orChoices(true).find((c) => c.id === "own")!;
+    expect(own.lead).toMatch(/3 minutes/);
+    expect(own.bullets.some((b) => /openrouter\.ai/.test(b))).toBe(true);
     expect(own.bullets.some((b) => /\$0\.06 per 500 transactions/.test(b))).toBe(true);
     expect(own.bullets.some((b) => /\$0\.0075/.test(b) && /15 per session/.test(b))).toBe(true);
     expect(own.bullets.some((b) => /dedicated key with a spend limit/.test(b))).toBe(true);

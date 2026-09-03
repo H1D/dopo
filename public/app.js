@@ -360,6 +360,7 @@ function main() {
     rulesNote: $el("#rulesNote"), rulesList: $el("#rulesList"),
     badgeToggle: $input("#badgeToggle"), settingsError: $el("#settingsError"), menuSettings: $btn("#menuSettings"),
     musicToggle: $input("#musicToggle"), sfxToggle: $input("#sfxToggle"),
+    obMusicToggle: $input("#obMusicToggle"), obSfxToggle: $input("#obSfxToggle"),
     musicChip: $btn("#musicChip"), musicPop: $el("#musicPop"),
     musicTitle: $el("#musicTitle"), musicAuthor: $el("#musicAuthor"),
     musicSkip: $btn("#musicSkip"), musicMute: $btn("#musicMute"), musicBan: $btn("#musicBan"),
@@ -2581,6 +2582,8 @@ function main() {
   function obRenderDone() {
     if (!onboardingActive || obStep !== "done") return;
     renderCutoffRow(els.obCutoffRow, els.obCutoffLine);
+    els.obMusicToggle.checked = audioPrefs.music;
+    els.obSfxToggle.checked = audioPrefs.sfx;
     let msg;
     if (loadInFlight) msg = "Loading your transactions…";
     else if (loadState === "live" && !stateError) {
@@ -3058,6 +3061,37 @@ function main() {
     }
   }
 
+  // ---------- sound prefs (Settings + wizard) ----------
+  /** @param {boolean} on  the toggle click is the audio unlock gesture */
+  function setMusicPref(on) {
+    audioPrefs = { ...audioPrefs, music: on };
+    try { audioSave(audioPrefs); } catch { /* session-only then */ }
+    els.musicToggle.checked = on;
+    els.obMusicToggle.checked = on;
+    updateMusicChip();
+    if (on) {
+      ensureAudio();
+      music?.enable();
+    } else {
+      music?.disable();
+      // suspend only when BOTH are off — the context is shared with SFX
+      if (!audioPrefs.sfx) void audioBus?.ctx.suspend().catch(() => { /* additive only */ });
+    }
+  }
+  /** @param {boolean} on */
+  function setSfxPref(on) {
+    audioPrefs = { ...audioPrefs, sfx: on };
+    try { audioSave(audioPrefs); } catch { /* session-only then */ }
+    els.sfxToggle.checked = on;
+    els.obSfxToggle.checked = on;
+    if (on) {
+      ensureAudio();
+      void audioBus?.ctx.resume().catch(() => { /* additive only */ }); // gesture
+    } else if (!audioPrefs.music) {
+      void audioBus?.ctx.suspend().catch(() => { /* additive only */ });
+    }
+  }
+
   // ---------- events ----------
   function bindUI() {
     els.btnAccept.addEventListener("click", actAccept);
@@ -3196,29 +3230,12 @@ function main() {
         setBadge(0);
       }
     });
-    els.musicToggle.addEventListener("change", () => {
-      audioPrefs = { ...audioPrefs, music: els.musicToggle.checked };
-      try { audioSave(audioPrefs); } catch { /* session-only then */ }
-      updateMusicChip();
-      if (audioPrefs.music) {
-        ensureAudio();
-        music?.enable(); // the toggle click is the unlock gesture
-      } else {
-        music?.disable();
-        // suspend only when BOTH are off — the context is shared with SFX
-        if (!audioPrefs.sfx) void audioBus?.ctx.suspend().catch(() => { /* additive only */ });
-      }
-    });
-    els.sfxToggle.addEventListener("change", () => {
-      audioPrefs = { ...audioPrefs, sfx: els.sfxToggle.checked };
-      try { audioSave(audioPrefs); } catch { /* session-only then */ }
-      if (audioPrefs.sfx) {
-        ensureAudio();
-        void audioBus?.ctx.resume().catch(() => { /* additive only */ }); // gesture
-      } else if (!audioPrefs.music) {
-        void audioBus?.ctx.suspend().catch(() => { /* additive only */ });
-      }
-    });
+    // Sound toggles live in Settings AND on the wizard's last step; both drive the
+    // same setters, and each mirrors the other so a reopened surface shows the truth.
+    els.musicToggle.addEventListener("change", () => setMusicPref(els.musicToggle.checked));
+    els.sfxToggle.addEventListener("change", () => setSfxPref(els.sfxToggle.checked));
+    els.obMusicToggle.addEventListener("change", () => setMusicPref(els.obMusicToggle.checked));
+    els.obSfxToggle.addEventListener("change", () => setSfxPref(els.obSfxToggle.checked));
     els.musicSkip.addEventListener("click", () => music?.skip());
     els.musicBan.addEventListener("click", () => music?.ban());
     els.musicMute.addEventListener("click", () => {

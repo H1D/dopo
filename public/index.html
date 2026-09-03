@@ -218,8 +218,12 @@
           <div class="field-hint" id="obOrHint" role="status" hidden></div>
           <div class="field-error" id="obOrError" role="status" hidden></div>
         </div>
-        <p class="field-sub">Create a dedicated key with a spend limit at
-          <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</p>
+        <p class="field-sub">Takes about 3 minutes:</p>
+        <ol class="ob-steps">
+          <li>Sign up at <a href="https://openrouter.ai" target="_blank" rel="noopener">openrouter.ai</a> and add a few dollars of credit — that covers months of sorting.</li>
+          <li>Open <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>, choose "Create API key", and set a spend limit so the worst case is bounded.</li>
+          <li>Copy the key and paste it above.</li>
+        </ol>
         <p class="field-sub">Costs about $0.06 per 500 transactions, plus $0.0075 each time dopo
           double-checks a merchant on the web (up to 15 checks a session).</p>
       </div>
@@ -238,6 +242,21 @@
       <button type="button" class="ob-cutoff-change" id="obCutoffChange" aria-controls="obCutoffRow" hidden>Change</button>
       <div class="cutoff-row" id="obCutoffRow" role="group" aria-label="How far back to sort" hidden></div>
       <p class="settings-info ob-cutoff-line" id="obCutoffLine" hidden></p>
+      <h3 class="ob-subtitle">Make it fun</h3>
+      <p>dopo is short for <b>dopamine-driven</b>: sorting should feel like a game, not a chore.
+        Sound is a big part of that — try it on.</p>
+      <label class="toggle-row">
+        <input type="checkbox" id="obMusicToggle">
+        <span class="toggle-text">Chiptune music
+          <span class="toggle-sub">Keygen-era tracker tunes while you sort, a fresh one every visit.</span>
+        </span>
+      </label>
+      <label class="toggle-row">
+        <input type="checkbox" id="obSfxToggle">
+        <span class="toggle-text">Sound effects
+          <span class="toggle-sub">Bleeps on swipes, thuds on landings, a fanfare at inbox zero.</span>
+        </span>
+      </label>
     </section>
 
   </div>

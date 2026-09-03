@@ -1132,6 +1132,8 @@ dialog.onboard:not([open]) { display: none; }
   margin: -8px 0 4px;
 }
 .ob-cutoff-line { padding: 6px 8px 0; }
+.ob-subtitle { font-size: 15px; font-weight: 800; margin: 18px 0 4px; }
+.onboard-step .toggle-row { padding-left: 0; padding-right: 0; }
 
 .onboard-footer {
   display: flex;
