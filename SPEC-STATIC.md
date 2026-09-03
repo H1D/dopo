@@ -170,10 +170,12 @@ source of truth for transaction data; the device is the source of truth for pend
   day (`new Date("…")` is UTC midnight = the previous day west of Greenwich); the year is added only
   when it isn't the current one, and a time only when the source actually carries one.
 - **Onboarding wizard** (`#onboard`, a `<dialog>` in the top layer; replaces the old onboarding
-  card): 4 steps — welcome (what dopo does, the privacy line, an offline note) → lm (paste the LM
-  token, live-validated) → or (a real radio group: `free` when a shared key is configured, else
-  `none`; `own` reveals a key field) → done (gesture legend, live uncategorized count, cutoff
-  chips). Shown iff `!tokens.lm || cursor`; resumes at the persisted step, never at `welcome` once a
+  card): 5 steps — welcome (what dopo does, the privacy line, an offline note) → lm (paste the LM
+  token, live-validated) → or (a real radio group, `own` first: `free` when a shared key is
+  configured, else `none`; `own` reveals a key field and a 3-step how-to) → tune (cutoff chips
+  always expanded as "Include transactions for", the live uncategorized count, and the music/SFX
+  toggles — shared `setMusicPref`/`setSfxPref` setters with Settings) → done (gesture legend).
+  Split so each step fits an iPhone SE without scrolling. Shown iff `!tokens.lm || cursor`; resumes at the persisted step, never at `welcome` once a
   token exists. Returning users (Forget tokens) skip to `["lm","or"]` when a shared free tier
   exists, else `["lm"]` alone — never silently defaulting a returning own-key user onto the shared
   key. The last step's primary button reads "Done" on the returning path, "Start sorting" on a

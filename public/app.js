@@ -368,7 +368,7 @@ function main() {
     obLmInput: $input("#obLmInput"), obLmShow: $btn("#obLmShow"), obLmHint: $el("#obLmHint"), obLmError: $el("#obLmError"),
     obAiGroup: $el("#obAiGroup"), obOrField: $el("#obOrField"),
     obOrInput: $input("#obOrInput"), obOrShow: $btn("#obOrShow"), obOrHint: $el("#obOrHint"), obOrError: $el("#obOrError"),
-    obCount: $el("#obCount"), obCutoffChange: $btn("#obCutoffChange"), obCutoffRow: $el("#obCutoffRow"), obCutoffLine: $el("#obCutoffLine"),
+    obCount: $el("#obCount"), obCutoffRow: $el("#obCutoffRow"), obCutoffLine: $el("#obCutoffLine"),
     obNote: $el("#obNote"), obBack: $btn("#obBack"), obSecondary: $btn("#obSecondary"), obNext: $btn("#obNext"),
     webBar: $el("#webBar"), webBarBtn: $btn("#webBarBtn"),
     connChip: $el("#connChip"), staleBanner: $el("#staleBanner"), stuckBanner: $btn("#stuckBanner"),
@@ -765,7 +765,7 @@ function main() {
     try { await flush("online"); } catch { /* flush routes/backs off internally */ }
     if (onboardingActive) {
       pendingSheetResync = true; // re-armed when the wizard closes
-      if (obStep === "done" && loadState !== "live") void obLoad({}); // "loads when you reconnect"
+      if (obStep === "tune" && loadState !== "live") void obLoad({}); // "loads when you reconnect"
       const w = obFieldOf();
       if (w && obField[w].status === "netfail" && obField[w].value) void obValidate(w); // "checks it when you reconnect"
       return;
@@ -2221,10 +2221,6 @@ function main() {
       obSetShown(which, false);
       obPaintField(which, null, null);
     }
-    els.obCutoffRow.hidden = true;
-    els.obCutoffLine.hidden = true;
-    els.obCutoffChange.hidden = true;
-    els.obCutoffChange.setAttribute("aria-expanded", "false");
     els.obNote.hidden = true;
     els.obNote.textContent = "";
     if (!opts.adoptHistory) {
@@ -2242,7 +2238,7 @@ function main() {
     const cursor = onboardCursorLoad();
     let start = cursor !== null && obSteps.includes(cursor) ? cursor : first;
     if (tokens.lm && start === "welcome") start = "lm";
-    if (!tokens.lm && (start === "or" || start === "done")) start = "lm";
+    if (!tokens.lm && start !== "welcome" && start !== "lm") start = "lm";
     return start;
   }
 
@@ -2267,7 +2263,7 @@ function main() {
     if (id === "or") renderAiChoices();
     obShowPanel(id);
     obRender();
-    if (id === "done") obRenderDone();
+    if (id === "tune") obRenderTune();
   }
 
   function obBack() {
@@ -2568,19 +2564,19 @@ function main() {
       }
       // chip tapped mid-fetch — but not on a token that just bounced us back to the lm step
       if (cutoff !== loadedCutoff && onboardingActive && !obDead.lm) { await loadDeckQuiet({ force: true }); return; }
-      obRenderDone();
+      obRenderTune();
     };
     stateError = null;
     loadInFlightFor = tokens.lm;
     loadInFlight = run();
-    obRenderDone(); // "Loading your transactions…" — after the flag is set, so it doesn't re-kick itself
+    obRenderTune(); // "Loading your transactions…" — after the flag is set, so it doesn't re-kick itself
     return loadInFlight;
   }
 
   /** Done step: live count line + cutoff chips. Starts the load itself when
    *  nothing is loaded yet (cursor resume lands here directly). */
-  function obRenderDone() {
-    if (!onboardingActive || obStep !== "done") return;
+  function obRenderTune() {
+    if (!onboardingActive || obStep !== "tune") return;
     renderCutoffRow(els.obCutoffRow, els.obCutoffLine);
     els.obMusicToggle.checked = audioPrefs.music;
     els.obSfxToggle.checked = audioPrefs.sfx;
@@ -2588,13 +2584,12 @@ function main() {
     if (loadInFlight) msg = "Loading your transactions…";
     else if (loadState === "live" && !stateError) {
       const { startDate } = fetchWindow();
-      const preset = CUTOFF_PRESETS.find((p) => p.id === cutoff)?.label ?? cutoff;
-      msg = `${backlog.length} uncategorized since ${fmtTxnDate(startDate)} (${preset})`;
+      msg = `${backlog.length} uncategorized transaction${backlog.length === 1 ? "" : "s"} since ${fmtTxnDate(startDate)}`;
     } else if (connOffline()) msg = "You're offline — dopo loads your transactions when you reconnect.";
     else if (stateError) msg = "Couldn't load yet — dopo retries when you start.";
     else { msg = "Loading your transactions…"; void obLoad({}); }
     els.obCount.textContent = msg;
-    els.obCutoffChange.hidden = loadState !== "live"; // "Change" needs a window to change
+    els.obCutoffLine.hidden = true; // the count line already names the start date
   }
 
   /** Wizard cutoff chip: same persistence as Settings, but the refetch happens right
@@ -3190,12 +3185,6 @@ function main() {
         ? /** @type {"free"|"none"|"own"} */ (r.value) : null;
       obRender();
       if (obChoice === "own") els.obOrInput.focus();
-    });
-    els.obCutoffChange.addEventListener("click", () => {
-      const show = els.obCutoffRow.hidden;
-      els.obCutoffRow.hidden = !show;
-      els.obCutoffLine.hidden = !show;
-      els.obCutoffChange.setAttribute("aria-expanded", String(show));
     });
     els.obCutoffRow.addEventListener("click", (e) => {
       const b = e.target instanceof Element ? e.target.closest("[data-cutoff]") : null;

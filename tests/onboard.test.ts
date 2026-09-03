@@ -35,8 +35,8 @@ describe("parseStep", () => {
 // ---------------------------------------------------------------------------
 
 describe("stepsFor", () => {
-  test("default (first run): all four steps in order", () => {
-    expect(stepsFor({})).toEqual(["welcome", "lm", "or", "done"]);
+  test("default (first run): all five steps in order", () => {
+    expect(stepsFor({})).toEqual(["welcome", "lm", "or", "tune", "done"]);
   });
 
   test("returning + hasFreeTier: lm then or (must not silently land on the shared key)", () => {
@@ -59,12 +59,14 @@ describe("nextStep / prevStep bounds", () => {
   test("nextStep walks the sequence and returns null past the end", () => {
     expect(nextStep(steps, "welcome")).toBe("lm");
     expect(nextStep(steps, "lm")).toBe("or");
-    expect(nextStep(steps, "or")).toBe("done");
+    expect(nextStep(steps, "or")).toBe("tune");
+    expect(nextStep(steps, "tune")).toBe("done");
     expect(nextStep(steps, "done")).toBeNull();
   });
 
   test("prevStep walks backward and returns null before the start", () => {
-    expect(prevStep(steps, "done")).toBe("or");
+    expect(prevStep(steps, "done")).toBe("tune");
+    expect(prevStep(steps, "tune")).toBe("or");
     expect(prevStep(steps, "or")).toBe("lm");
     expect(prevStep(steps, "lm")).toBe("welcome");
     expect(prevStep(steps, "welcome")).toBeNull();
@@ -203,6 +205,11 @@ describe("canAdvance", () => {
     expect(a.checkFirst).toBe(false);
     const b = canAdvance({ stepId: "lm", steps: steps4, field: { status: "netfail", value: "" }, saved: true, choice: null, returning: false });
     expect(b.canContinue).toBe(true); // Back-after-save while offline: the saved token carries
+  });
+
+  test("tune: always continuable with the plain Continue label", () => {
+    const a = canAdvance({ stepId: "tune", steps: steps4, field: FIELD_IDLE, saved: false, choice: null, returning: false });
+    expect(a).toEqual({ canContinue: true, primary: "Continue", secondary: null, showBack: true, checkFirst: false });
   });
 
   test("or: choice null -> cannot continue regardless of field state", () => {
