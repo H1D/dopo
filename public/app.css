@@ -209,6 +209,8 @@ header.top {
   font-size: 12px;
   color: var(--muted);
 }
+.music-source { color: var(--accent); text-decoration: none; }
+.music-source::after { content: " ↗"; }
 .music-controls {
   display: flex;
   gap: 6px;
