@@ -44,6 +44,15 @@ const MAX_CONSECUTIVE_FAILURES = 3;
  * @property {string} file
  * @property {string} title
  * @property {string} author
+ * @property {string} [sourceUrl]  where the track was taken from (attribution link)
+ */
+
+/**
+ * What the mini-player shows: attribution for the track now playing.
+ * @typedef {object} NowPlaying
+ * @property {string} title
+ * @property {string} author
+ * @property {string} [sourceUrl]
  */
 
 /**
@@ -63,6 +72,13 @@ const MAX_CONSECUTIVE_FAILURES = 3;
  * @property {(n: number) => void} setRepeatCount
  */
 
+/** Only https links get rendered as attribution links. @param {unknown} v */
+function httpsUrl(v) {
+  if (typeof v !== "string") return undefined;
+  try { return new URL(v).protocol === "https:" ? v : undefined; }
+  catch { return undefined; }
+}
+
 /** @param {unknown} raw @returns {TrackMeta[]} */
 function normalizeManifest(raw) {
   if (!Array.isArray(raw)) return [];
@@ -77,6 +93,7 @@ function normalizeManifest(raw) {
       file: o.file,
       title: typeof o.title === "string" && o.title ? o.title : o.id,
       author: typeof o.author === "string" && o.author ? o.author : "unknown",
+      sourceUrl: httpsUrl(o.source_url),
     });
   }
   return out;
@@ -85,7 +102,7 @@ function normalizeManifest(raw) {
 /**
  * @param {object} opts
  * @param {import("./sfx.js").AudioBus} opts.bus
- * @param {(now: {title: string, author: string}|null) => void} opts.onTrackChange
+ * @param {(now: NowPlaying|null) => void} opts.onTrackChange
  *   mini-player repaint hook; null = nothing playing
  * @param {() => boolean} opts.anyAudioOn  is EITHER toggle on — the visibility
  *   suspend/resume acts on the shared context, so it must know about SFX too
@@ -123,9 +140,12 @@ export function createMusic({ bus, onTrackChange, anyAudioOn }) {
     catch { /* additive only */ }
   };
 
+  /** @param {TrackMeta|undefined} t @returns {NowPlaying|null} */
+  const nowPlaying = (t) => t ? { title: t.title, author: t.author, sourceUrl: t.sourceUrl } : null;
+
   const notify = () => {
     const t = enabled ? byId.get(currentTrack(state) ?? "") : undefined;
-    onTrackChange(t ? { title: t.title, author: t.author } : null);
+    onTrackChange(nowPlaying(t));
     // Lock screen / media hub: the same attribution the popover shows.
     try {
       if ("mediaSession" in navigator) {
@@ -504,10 +524,10 @@ export function createMusic({ bus, onTrackChange, anyAudioOn }) {
 
     get muted() { return muted; },
 
-    /** @returns {{title: string, author: string}|null} */
+    /** @returns {NowPlaying|null} */
     now() {
       const t = byId.get(currentTrack(state) ?? "");
-      return enabled && t ? { title: t.title, author: t.author } : null;
+      return enabled ? nowPlaying(t) : null;
     },
   };
   return api;

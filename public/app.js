@@ -1371,10 +1371,20 @@ function main() {
   }
   /** SFX facade — null unless the toggle is on, so call sites stay one-liners. */
   const fx = () => (audioPrefs.sfx ? sfxKit : null);
-  /** @param {{title: string, author: string}|null} now */
+  /** @param {import("./lib/music.js").NowPlaying|null} now */
   function renderMusicPop(now) {
     els.musicTitle.textContent = now ? now.title : "—";
     els.musicAuthor.textContent = now ? `by ${now.author}` : "";
+    if (now?.sourceUrl) {
+      // Attribution: link to where the track was taken from, labelled by host.
+      const a = document.createElement("a");
+      a.href = now.sourceUrl;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.className = "music-source";
+      a.textContent = new URL(now.sourceUrl).hostname.replace(/^www\./, "");
+      els.musicAuthor.append(" · ", a);
+    }
   }
   function updateMusicChip() {
     els.musicChip.hidden = !audioPrefs.music;
