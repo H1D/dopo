@@ -37,7 +37,7 @@
  * for the sizes involved (MAX_LEVEL = 40) and impossible to desync.
  */
 
-import { gridCols, labelOf, renderCols, renderDock, renderTiles, renderWheel, wheelGeometry, wheelHit } from "./picker.js";
+import { R_FULL, gridCols, labelOf, renderCols, renderDock, renderTiles, renderWheel, wheelGeometry, wheelHit } from "./picker.js";
 
 /** @typedef {import("./picker.js").PickerId} PickerId */
 /** @typedef {import("./picker.js").Node} PkNode */
@@ -103,8 +103,12 @@ const MIN_TAP = 44;
 const MIN_ARC = 32;
 /** The wheel's viewBox is -102..102 on both axes. */
 const WHEEL_BOX = 204;
-/** How far above the finger the lens chip rides, in CSS px. */
-const LENS_LIFT = 64;
+/** Pointer travel (CSS px) after a drag-opened group inside which nothing is hovered or committed — see openGroup(). */
+const OPEN_SLOP = 12;
+/** Popover API present? The lens chip then renders in the top layer (above the
+ *  sheet's overflow:hidden and every stacking context). Guarded so the module
+ *  stays import-safe under `bun test`, which has no DOM. */
+const POPOVER_OK = typeof HTMLElement !== "undefined" && "showPopover" in HTMLElement.prototype;
 
 /** Monotonic mount counter behind PickerUIHandle.destroy()'s ownership check. */
 let mountSeq = 0;
@@ -126,11 +130,16 @@ export function createPickerUI(opts) {
   let wheelHover = /** @type {string|null} */ (null);
   /** Wheel only: geometry of the level on screen, for hit testing. */
   let geom = /** @type {ReturnType<typeof wheelGeometry>|null} */ (null);
+  /** Wheel only: last pointer position in client px, so openGroup() can anchor the dead zone. */
+  let lastPt = /** @type {{x: number, y: number}|null} */ (null);
+  /** Wheel only: where the pointer was when it opened the current fan, until it travels OPEN_SLOP away. */
+  let openedAt = /** @type {{x: number, y: number}|null} */ (null);
   /** Centre label to restore when the wheel hover clears. */
   let centerText = "";
   /** Wheel only: the chip riding above the finger. Built on first hover. */
   let lens = /** @type {HTMLElement|null} */ (null);
-  /** Wheel only: last pointer position, root-relative, for the lens. */
+  /** Wheel only: last pointer position for the lens — VIEWPORT px when the chip
+   *  is a popover (position:fixed), root-relative px in the fallback. */
   let lensPt = /** @type {{x: number, y: number}|null} */ (null);
   /** Lens size, re-measured only when its text changes — see paintLens(). */
   let lensBox = { w: 120, h: 34 };
@@ -321,6 +330,9 @@ export function createPickerUI(opts) {
     const view = viewFor(k);
     const tmp = document.createElement("div");
     tmp.innerHTML = renderWheel(view);
+    // the inner paths are never re-created: CSS shrinks the ring off this class
+    const svg = root.querySelector("svg");
+    if (svg) svg.classList.toggle("pk-open", view.group !== null);
     const outer = root.querySelector("g.pk-outer");
     const nextOuter = tmp.querySelector("g.pk-outer");
     if (outer && nextOuter) outer.replaceChildren(...Array.from(nextOuter.childNodes));
@@ -367,7 +379,18 @@ export function createPickerUI(opts) {
     const msg = tile?.getAttribute("aria-label") || labelOf(g, false).text;
     groupKey = g.key;
     hoverKey = null;
-    if (variant === "wheel") { redrawWheel(g.key); buzz(LEVEL_MS); } else render();
+    if (variant === "wheel") {
+      redrawWheel(g.key);
+      buzz(LEVEL_MS);
+      // Dead zone around the finger that just opened the fan. The hit geometry
+      // flips instantly — a finger at r≈70 on a full-size group wedge is inside
+      // the fan band the moment R1 becomes 56 — while the ring visibly shrinks
+      // over 120ms. Without it the very next pointermove would hover a child,
+      // and a tap-tap user would commit one they never chose on pointerup.
+      if (!scripted && dragging && lastPt) openedAt = { x: lastPt.x, y: lastPt.y };
+    } else {
+      render();
+    }
     announce(msg);
     if (!scripted) focusFirstChild(g);   // a demo must not yank focus off the page
   }
@@ -451,7 +474,9 @@ export function createPickerUI(opts) {
     const svg = root.querySelector("svg");
     if (!svg || !geom) return null;
     const p = polar(e, svg);
-    return p ? wheelHit(geom, p.rad, p.ang) : null;
+    // `wheelHover` is the hysteresis anchor: the commit on pointerup must be
+    // the wedge the lens is showing, so down/move/up all test the same way
+    return p ? wheelHit(geom, p.rad, p.ang, wheelHover) : null;
   }
 
   /**
@@ -497,6 +522,12 @@ export function createPickerUI(opts) {
    * The lens: a chip ABOVE the finger carrying the hovered node's emoji, its
    * name and its own wedge colour. The finger covers the wedge it is on — this
    * is the only way to see the current pick during a drag.
+   *
+   * With the Popover API it is a `popover="hint"` in the top layer, so the
+   * sheet body's overflow:hidden and neighbouring stacking contexts cannot clip
+   * or cover it. It stays a child of the picker root: top-layer rendering does
+   * not depend on DOM position, and destroy()'s replaceChildren() still sweeps
+   * it. Without the API it falls back to the absolute z-index:4 chip.
    * @param {{node: PkNode, parent: PkGroup|null}|null} rec @param {Element|null} el
    */
   function paintLens(rec, el) {
@@ -505,6 +536,7 @@ export function createPickerUI(opts) {
       lens = document.createElement("div");
       lens.className = "pk-lens";
       lens.setAttribute("aria-hidden", "true");
+      if (POPOVER_OK) lens.setAttribute("popover", "hint");
       const g = document.createElement("span");
       g.className = "pk-lens-glyph";
       const t = document.createElement("span");
@@ -522,38 +554,77 @@ export function createPickerUI(opts) {
     if (name instanceof HTMLElement) name.textContent = lab.text;
     const h = el instanceof SVGElement ? el.getAttribute("data-h") : null;
     lens.style.setProperty("--h", h ?? "0");
+    // ORDER: open BEFORE measuring — a closed popover is display:none and
+    // reads 0x0, which would leave the chip clamped to the wrong lift.
+    if (POPOVER_OK && !lensOpen()) lensShow();
     // measured HERE and cached: moveLens runs on every pointermove and a layout
     // read per move is exactly the jank the whole picker exists to avoid
     lensBox = { w: lens.offsetWidth || 120, h: lens.offsetHeight || 34 };
     moveLens();
   }
 
-  /** Follows the pointer every move, clamped inside the picker. Near the top
-   *  edge there is no room above the finger, so the chip flips below it rather
-   *  than sliding under the fingertip it is there to see past. */
+  /** Is the popover chip currently in the top layer? `:popover-open` throws a
+   *  SyntaxError where the pseudo-class is unknown, hence the guard. */
+  function lensOpen() {
+    if (!lens) return false;
+    try { return lens.matches(":popover-open"); } catch { return false; }
+  }
+
+  /** showPopover() throws on a disconnected element or an already-open one. */
+  function lensShow() {
+    if (!lens || !lens.isConnected) return;
+    try { lens.showPopover(); } catch { /* not connected / already open */ }
+  }
+
+  /** Follows the pointer every move, clamped inside the viewport (popover) or
+   *  the picker (fallback). Near the top edge there is no room above the
+   *  finger, so the chip flips below it rather than sliding under the
+   *  fingertip it is there to see past. */
   function moveLens() {
     if (!lens || !lensPt) return;
-    const w = root.clientWidth || 1;
-    const hgt = root.clientHeight || 1;
+    // A `hint` popover is light-dismissed by ANY pointerup outside it (a
+    // second finger, a palm brushing the screen) and by Escape. Re-arming on
+    // every move bounds the loss to one move event. `manual` would be the
+    // stricter type; the user asked for `hint` by name, so that is what ships.
+    if (POPOVER_OK && lens.isConnected && !lensOpen()) lensShow();
+    const w = (POPOVER_OK ? window.innerWidth : root.clientWidth) || 1;
+    const hgt = (POPOVER_OK ? window.innerHeight : root.clientHeight) || 1;
     const lh = lensBox.h;
     const half = lensBox.w / 2;
+    // The thumb pad occludes roughly 50-60 px above the contact point, so the
+    // lift grows with the chip: its centre must clear that band by half its
+    // own height or the bottom edge tucks back under the finger.
+    const lift = 56 + lh / 2;
     const x = Math.max(half + 2, Math.min(w - half - 2, lensPt.x));
-    const above = lensPt.y - LENS_LIFT;
+    const above = lensPt.y - lift;
     const y = above - lh / 2 >= 2
       ? above
-      : Math.min(hgt - lh / 2 - 2, lensPt.y + LENS_LIFT);
+      : Math.min(hgt - lh / 2 - 2, lensPt.y + lift);
     lens.style.setProperty("--lx", String(Math.round(x)) + "px");
     lens.style.setProperty("--ly", String(Math.round(y)) + "px");
   }
 
   function hideLens() {
-    if (lens && lens.parentNode) lens.remove();
+    if (!lens) return;
+    if (lensOpen()) { try { lens.hidePopover(); } catch { /* already closed */ } }
+    if (lens.parentNode) lens.remove();
   }
 
-  /** Pointer position in root-relative px, for the lens. @param {PointerEvent} e */
+  /** Pointer position for the lens: viewport px as a popover (position:fixed),
+   *  root-relative px in the fallback. @param {PointerEvent} e */
   function trackPointer(e) {
+    if (POPOVER_OK) { lensPt = { x: e.clientX, y: e.clientY }; return; }
     const r = root.getBoundingClientRect();
     lensPt = { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  /** demo.spot() reports ROOT-relative px (the ghost finger relies on that);
+   *  the popover chip wants viewport px, so shift by the root's screen offset.
+   *  @param {{x: number, y: number}|null} p */
+  function lensPtFromSpot(p) {
+    if (!p || !POPOVER_OK) return p;
+    const r = root.getBoundingClientRect();
+    return { x: p.x + r.left, y: p.y + r.top };
   }
 
   /** @param {number|null} id */
@@ -583,6 +654,7 @@ export function createPickerUI(opts) {
     try { svg.setPointerCapture(e.pointerId); capturedId = e.pointerId; } catch { /* unsupported: drag still works via bubbling */ }
     dragging = true;
     downCenter = false;
+    lastPt = { x: e.clientX, y: e.clientY };
     trackPointer(e);
     const h = hitAt(e);
     if (!h) return;
@@ -595,17 +667,33 @@ export function createPickerUI(opts) {
   /** @param {PointerEvent} e */
   function wheelMove(e) {
     if (!dragging) return;
+    lastPt = { x: e.clientX, y: e.clientY };
     trackPointer(e);
     moveLens();
+    if (openedAt) {
+      if (inOpenSlop(e)) return;   // still on the wedge that opened the fan: no hover change
+      openedAt = null;
+    }
     const h = hitAt(e);
     if (h && "key" in h) { wheelTo(h.key); return; }
     setWheelHover(null);   // the hub and the dead zone outside the rings
   }
 
   /** @param {PointerEvent} e */
+  function inOpenSlop(e) {
+    return openedAt !== null && Math.hypot(e.clientX - openedAt.x, e.clientY - openedAt.y) <= OPEN_SLOP;
+  }
+
+  /** @param {PointerEvent} e */
   function wheelUp(e) {
     dragging = false;
     releaseCapture(e.pointerId);
+    if (openedAt) {
+      // a tap that opened a group: the fan stays up and the NEXT tap picks a child
+      const tapped = inOpenSlop(e);
+      openedAt = null;
+      if (tapped) { hideLens(); setWheelHover(null); return; }
+    }
     const h = hitAt(e);
     hideLens();
     if (h && "center" in h) { if (downCenter) back(); return; }
@@ -652,8 +740,8 @@ export function createPickerUI(opts) {
   /** @param {PointerEvent} e */
   function onPointerUp(e) {
     const stale = preArm.delete(e.pointerId);
-    if (destroyed || committed || !armed || stale) { dragging = false; hideLens(); return; }
-    if (variant !== "wheel" || !dragging) { dragging = false; return; }
+    if (destroyed || committed || !armed || stale) { dragging = false; openedAt = null; hideLens(); return; }
+    if (variant !== "wheel" || !dragging) { dragging = false; openedAt = null; return; }
     wheelUp(e);
   }
 
@@ -662,6 +750,7 @@ export function createPickerUI(opts) {
     preArm.delete(e.pointerId);
     dragging = false;
     downCenter = false;
+    openedAt = null;
     releaseCapture(e.pointerId);
     hideLens();
     if (variant === "wheel" && !committed && !destroyed) setWheelHover(null);
@@ -791,13 +880,18 @@ export function createPickerUI(opts) {
     /** @param {{w: number}[]} ring @param {number} r0 @param {number} r1 */
     const ok = (ring, r0, r1) => (r1 - r0) * s >= MIN_TAP - 0.5
       && ring.every((it) => it.w * ((r0 + r1) / 2) * s >= MIN_ARC - 0.5);
+    // At rest the inner ring is the whole disc; the conservative case is the
+    // shrunken ring (R0..56) while a fan is open, so that R1 is the one checked
+    // whenever the tree has a group at all.
     const top = wheelGeometry(tree, null);
-    if (!ok(top.inner, top.R0, top.R1)) return false;
+    let innerR1 = top.R1;
     for (const n of tree) {
       if (n.kind !== "group") continue;
       const g = wheelGeometry(tree, n);
+      innerR1 = g.R1;
       if (!ok(g.outer, g.R1, g.R2)) return false;
     }
+    if (!ok(top.inner, top.R0, innerR1)) return false;
     return true;
   }
 
@@ -838,7 +932,9 @@ export function createPickerUI(opts) {
       if (!w) return null;
       const b = svg.getBoundingClientRect();
       const sc = Math.min(b.width, b.height) / WHEEL_BOX;
-      const rad = rec && rec.parent !== null ? (g.R1 + g.R2) / 2 : (g.R0 + g.R1) / 2;
+      // the inner ring is drawn at R0..R_FULL and CSS-scaled, so its visual
+      // mid radius is the drawn one times innerScale — not (R0 + R1) / 2
+      const rad = rec && rec.parent !== null ? (g.R1 + g.R2) / 2 : g.innerScale * (g.R0 + R_FULL) / 2;
       return {
         x: b.left + b.width / 2 + Math.cos(w.a) * rad * sc - rr.left,
         y: b.top + b.height / 2 + Math.sin(w.a) * rad * sc - rr.top,
@@ -860,14 +956,14 @@ export function createPickerUI(opts) {
       try {
         const el = elFor(k);
         if (el) press(el);
-        lensPt = demo.spot(k);
+        lensPt = lensPtFromSpot(demo.spot(k));
         wheelTo(k);
       } finally { scripted = false; }
     },
     slide(k) {
       if (destroyed || committed) return;
       scripted = true;
-      try { lensPt = demo.spot(k); moveLens(); wheelTo(k); } finally { scripted = false; }
+      try { lensPt = lensPtFromSpot(demo.spot(k)); moveLens(); wheelTo(k); } finally { scripted = false; }
     },
     release(k) {
       if (destroyed || committed) return;

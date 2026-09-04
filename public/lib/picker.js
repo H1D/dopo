@@ -574,6 +574,11 @@ function srButtonHTML(node, inGroup, code, view) {
  * Wheel — inner ring of top-level wedges, outer fan of the open group's
  * children, centre = back. Geometry and hit-testing are shared with the engine
  * through wheelGeometry()/wheelHit() so a redraw can never disagree with a hit.
+ *
+ * The inner ring is ALWAYS drawn at R0..R_FULL (the whole disc). When a group
+ * is open the <svg> carries `pk-open` and CSS scales `g.pk-inner` by
+ * innerScale, which makes room for the fan without re-creating the inner paths
+ * (the pointer capture lives on the <svg>; see pickerui.js redrawWheel()).
  * @param {View} view
  * @returns {string}
  */
@@ -581,7 +586,8 @@ export function renderWheel(view) {
   const geom = wheelGeometry(view.nodes, view.group);
   const group = view.group;
   const n = view.nodes.length;
-  const fs = Math.min(12, (60 / Math.max(1, n)) * 1.6 + 3);
+  // glyph size at rest, in full-disc units; CSS scales it with the ring
+  const fs = Math.min(20, (60 / Math.max(1, n)) * 1.6 + 8);
   let innerRingHtml = "";
   let srHtml = "";
   geom.inner.forEach((w, i) => {
@@ -595,8 +601,8 @@ export function renderWheel(view) {
     if (marks.guess) cls += " pk-guess";
     const clsHtml = esc(cls);
     const hotAttrHtml = code ? ` data-hot="${esc(code)}"` : "";
-    const dHtml = arcPath(w.a - w.w / 2, w.a + w.w / 2, geom.R0, geom.R1);
-    const rm = (geom.R0 + geom.R1) / 2;
+    const dHtml = arcPath(w.a - w.w / 2, w.a + w.w / 2, geom.R0, R_FULL);
+    const rm = (geom.R0 + R_FULL) / 2;
     const gx = r1(Math.cos(w.a) * rm);
     const gy = r1(Math.sin(w.a) * rm);
     const glyphClsHtml = lab.emoji ? "pk-glyph" : "pk-glyph pk-mono";
@@ -604,8 +610,8 @@ export function renderWheel(view) {
     innerRingHtml += `<path class="${clsHtml}" data-key="${esc(node.key)}"${hotAttrHtml} data-h="${Number(hueOf(view.hues, node.key))}" d="${dHtml}"/>`;
     innerRingHtml += `<text class="${glyphClsHtml}" x="${Number(gx)}" y="${Number(gy)}" font-size="${Number(gs)}">${esc(lab.emoji || lab.mono)}</text>`;
     if (marks.recent) {
-      const dx = r1(Math.cos(w.a) * (geom.R0 + 4));
-      const dy = r1(Math.sin(w.a) * (geom.R0 + 4));
+      const dx = r1(Math.cos(w.a) * (R_FULL - 6));
+      const dy = r1(Math.sin(w.a) * (R_FULL - 6));
       innerRingHtml += `<circle class="pk-dot" cx="${Number(dx)}" cy="${Number(dy)}" r="2.2"/>`;
     }
     if (marks.guess) {
@@ -613,8 +619,8 @@ export function renderWheel(view) {
       innerRingHtml += `<text class="pk-star" x="${Number(gx)}" y="${Number(sy)}" font-size="${Number(r1(gs * 0.6))}">★</text>`;
     }
     if (view.keyed && code) {
-      const kx = r1(Math.cos(w.a) * (geom.R1 - 5));
-      const ky = r1(Math.sin(w.a) * (geom.R1 - 5));
+      const kx = r1(Math.cos(w.a) * (R_FULL - 5));
+      const ky = r1(Math.sin(w.a) * (R_FULL - 5));
       innerRingHtml += `<text class="pk-hot" x="${Number(kx)}" y="${Number(ky)}">${esc(keyLabel(code))}</text>`;
     }
     srHtml += srButtonHTML(node, false, code, view);
@@ -663,7 +669,8 @@ export function renderWheel(view) {
   }
   const c1 = group ? labelOf(group, false).text : "hold + drag";
   const c2 = group ? "tap centre = back" : "or just tap";
-  return `<div class="pk pk-wheel"><svg viewBox="-102 -102 204 204" aria-hidden="true" focusable="false"><g class="pk-inner">${innerRingHtml}</g><g class="pk-outer">${outerRingHtml}</g><circle class="pk-center" r="18.5" data-back="1"/><text class="pk-c1" y="-3">${esc(c1)}</text><text class="pk-c2" y="5">${esc(c2)}</text></svg><div class="pk-sr">${srHtml}</div></div>`;
+  const svgClsHtml = group ? ' class="pk-open"' : "";
+  return `<div class="pk pk-wheel"><svg${svgClsHtml} viewBox="-102 -102 204 204" aria-hidden="true" focusable="false"><g class="pk-inner">${innerRingHtml}</g><g class="pk-outer">${outerRingHtml}</g><circle class="pk-center" r="18.5" data-back="1"/><text class="pk-c1" y="-3">${esc(c1)}</text><text class="pk-c2" y="5">${esc(c2)}</text></svg><div class="pk-sr">${srHtml}</div></div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -671,19 +678,40 @@ export function renderWheel(view) {
 // ---------------------------------------------------------------------------
 
 /** @typedef {{key: string, a: number, w: number}} Wedge  a = centre angle (rad), w = angular width */
-/** @typedef {{inner: Wedge[], outer: Wedge[], R0: number, R1: number, R2: number}} WheelGeometry */
+/**
+ * @typedef {object} WheelGeometry
+ * @property {Wedge[]} inner  top-level wedges
+ * @property {Wedge[]} outer  the open group's children (empty at rest)
+ * @property {number} R0      hub radius
+ * @property {number} R1      where the inner ring's HIT band ends: R_FULL at rest, 56 when a group is open
+ * @property {number} R2      outer edge of the fan
+ * @property {number} innerScale  R1 / R_FULL — how far CSS shrinks the drawn inner ring (1 at rest)
+ */
+
+/**
+ * The inner ring's DRAWN outer radius. renderWheel() always builds the inner
+ * paths at R0..R_FULL; when a group is open CSS scales `g.pk-inner` by
+ * innerScale (`svg.pk-open g.pk-inner { transform: scale(.571) }`, 56/98) so
+ * the fan fits outside it. One number, three consumers: the hit test (R1),
+ * the demo's finger spot (innerScale · mid radius) and that CSS rule.
+ */
+export const R_FULL = 98;
 
 /**
  * Wedge i is centred at -π/2 + i·(2π/n) (12 o'clock first, clockwise in SVG
  * coordinates). Children fan around their parent's angle, so opening a group
  * only redraws the outer ring — the pointer capture survives the gesture.
+ *
+ * Hit geometry follows the level: at rest the whole disc (R0..R_FULL) is the
+ * inner ring; with a group open the ring's hit band ends at 56 and the fan
+ * takes 58..R2. The drawing does not change — only the CSS scale does.
  * @param {readonly Node[]} nodes
  * @param {GroupNode|null} group
  * @returns {WheelGeometry}
  */
 export function wheelGeometry(nodes, group) {
   const R0 = 20;
-  const R1 = 56;
+  const R1 = group ? 56 : R_FULL;
   const R2 = 98;
   const list = nodes ?? [];
   const n = list.length;
@@ -702,16 +730,23 @@ export function wheelGeometry(nodes, group) {
     const ww = Math.min(0.85, (2 * Math.PI) / k);
     group.children.forEach((c, i) => outer.push({ key: c.key, a: pa + (i - (k - 1) / 2) * ww, w: ww }));
   }
-  return { inner, outer, R0, R1, R2 };
+  return { inner, outer, R0, R1, R2, innerScale: R1 / R_FULL };
 }
+
+/**
+ * Angular hysteresis for wheelHit(): a wedge already under the finger keeps the
+ * hit until the angle is this far PAST its edge (radians).
+ */
+const HYST = 0.06;
 
 /**
  * @param {WheelGeometry} geom
  * @param {number} rad  distance from the centre in viewBox units
  * @param {number} ang  radians, atan2(dy, dx)
+ * @param {string|null} [keep]  the currently hovered key, for hysteresis
  * @returns {{center: true}|{key: string}|null}
  */
-export function wheelHit(geom, rad, ang) {
+export function wheelHit(geom, rad, ang, keep = null) {
   /** @param {number} d @returns {number} */
   const norm = (d) => Math.atan2(Math.sin(d), Math.cos(d));
   /**
@@ -721,9 +756,19 @@ export function wheelHit(geom, rad, ang) {
    * children — where |ang - a| is w/2 plus one float ulp for BOTH neighbours and
    * a strict `<=` rejects the pair, leaving the most natural gesture on the
    * wheel with nothing highlighted and nothing to commit. The slack closes it.
+   *
+   * The same seam is why `keep` exists: a finger resting on it jitters by a
+   * pixel and the nearest wedge flips between the two children on every move,
+   * with a haptic tick and a lens swap each time. The wedge already hovered
+   * keeps the hit until the angle is HYST past its edge — but only within its
+   * own ring, so crossing from the inner ring into the fan never sticks.
    * @param {readonly Wedge[]} ring @returns {{key: string}|null}
    */
   const nearest = (ring) => {
+    if (keep !== null) {
+      const held = ring.find((it) => it.key === keep);
+      if (held && Math.abs(norm(ang - held.a)) <= held.w / 2 + HYST) return { key: held.key };
+    }
     /** @type {Wedge|null} */
     let best = null;
     let bestD = Infinity;
