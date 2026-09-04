@@ -279,21 +279,15 @@ function main() {
   let obChoice = null; // AI step radio; nothing pre-selected
   /** @type {ReturnType<typeof setTimeout>|null} */
   let obDebounce = null; // 600 ms after the last keystroke the field validates itself
-  // ---- picker step: the inline "try it" panel
-  let tryOpen = false; // the try panel owns the step body AND the wizard footer
+  // ---- picker step: the live try panel under the style chips
+  let tryOpen = false; // the panel is mounted (picker step showing)
   /** @type {PickerUI|null} */
   let tryEngine = null;
   /** @type {PkNode[]|null} */
-  let tryTree = null; // frozen for the session: a fetch landing mid-try must not swap it
-  let trySample = 0; // index into TRY_SAMPLES; each pick deals the next one
+  let tryTree = null;
+  let tryTreeReal = false; // built from the user's own categories (else the demo tree until they land)
+  let trySample = 0; // which sample transaction is on the table; each pick deals the next one
   let tryStart = 0; // performance.now() of the last mount, for the "· 0.8 s" readout
-  // ---- the ghost finger that demonstrates the picker on the onboarding step
-  /** @type {HTMLElement|null} */
-  let ghostEl = null;
-  /** @type {ReturnType<typeof setTimeout>[]} */
-  let ghostTimers = [];
-  let ghostOn = false; // false the instant the user touches the panel, for the rest of the step
-  let ghostTurn = 0; // rotates the demonstrated group/child so it never repeats itself
   /** @type {{lm: Promise<void>|null, or: Promise<void>|null}} */
   const obCheck = { lm: null, or: null }; // in-flight validation per field — Continue awaits it
   let obContinuing = false; // Continue re-entrancy latch (blur-validate + tap + Enter can land together)
@@ -419,7 +413,7 @@ function main() {
     obAiGroup: $el("#obAiGroup"), obOrField: $el("#obOrField"),
     obOrInput: $input("#obOrInput"), obOrShow: $btn("#obOrShow"), obOrHint: $el("#obOrHint"), obOrError: $el("#obOrError"),
     obCount: $el("#obCount"), obCutoffRow: $el("#obCutoffRow"),
-    obPickerRow: $el("#obPickerRow"), obPickerBlurb: $el("#obPickerBlurb"), obPickerTry: $btn("#obPickerTry"),
+    obPickerRow: $el("#obPickerRow"), obPickerBlurb: $el("#obPickerBlurb"),
     obPickerPanel: $el("#obPickerPanel"), obPickerSample: $el("#obPickerSample"),
     obPickerRoot: $el("#obPickerRoot"), obPickerResult: $el("#obPickerResult"),
     obNote: $el("#obNote"), obBack: $btn("#obBack"), obSecondary: $btn("#obSecondary"), obNext: $btn("#obNext"),
@@ -3050,6 +3044,7 @@ function main() {
       // chip / checkbox tapped mid-fetch — but not on a token that just bounced us back to the lm step
       if (windowKey() !== loadedWindow && onboardingActive && !obDead.lm) { await loadDeckQuiet({ force: true }); return; }
       obRenderTune();
+      obPreviewRefresh(); // the picker step may be showing the demo tree: swap in the real one
     };
     stateError = null;
     loadInFlightFor = tokens.lm;
@@ -3092,64 +3087,72 @@ function main() {
   }
 
   // ---------- onboarding: the picker step ----------
-  /** Three merchants, dealt in turn — one pick is not enough to judge a picker,
-   *  and a static sample makes the second pick pure muscle memory. */
+  // The chips pick a style; the panel under them IS that picker, live, on the
+  // user's own categories (the deck has usually landed by now — the demo tree
+  // stands in until it does) and on their own transactions. Nothing here touches
+  // Lunch Money: a pick just deals the next sample.
+
+  /** Stand-ins while the deck is still loading, or when it is empty. */
   const TRY_SAMPLES = [
     { merchant: "Albert Heijn", amount: 42.17, currency: "eur" },
     { merchant: "NS Reizigers", amount: 8.4, currency: "eur" },
     { merchant: "Spotify", amount: 11.99, currency: "eur" },
   ];
 
-  /** Entering the step: chips painted, then the preview starts demonstrating
-   *  itself. The default is persisted here so "never tapped a chip" still leaves
-   *  a real choice behind. */
+  /** Entering the step: chips + blurb painted, panel mounted on the next frame.
+   *  The default is persisted here so "never tapped a chip" still leaves a real
+   *  choice behind. */
   function obEnterPicker() {
     if (pickerPref === null) {
       pickerPref = "tiles";
       try { pickerSave(pickerPref); } catch { /* session-only then */ }
     }
     renderPickerRow(els.obPickerRow, pickerPref, els.obPickerBlurb);
-    els.obPickerBlurb.hidden = true; // the live preview says more than the blurb did
-    // the panel is measured on mount (fits(), grid columns, ghost coordinates) and
-    // obShowPanel only unhides this step AFTER us — so start on the next frame
+    // the panel is measured on mount (fits(), grid columns) and obShowPanel only
+    // unhides this step AFTER us — so mount on the next frame
     requestAnimationFrame(() => {
       if (obStep === "picker" && onboardingActive) obPreviewStart();
     });
   }
 
-  /** Mount the engine and set the ghost finger going. Idempotent per step. */
+  /** Mount the panel. Idempotent per step. */
   function obPreviewStart() {
     if (obStep !== "picker" || !onboardingActive) return;
     if (!tryOpen) {
       tryOpen = true;
-      // frozen for the whole session: a fetch landing mid-preview must not swap the tree
-      const cats = categories.length ? categories : DEMO_CATEGORIES;
-      tryTree = pickerTree(cats, cats !== DEMO_CATEGORIES);
+      obTryBuildTree();
       trySample = 0;
       els.obPickerResult.textContent = "";
     }
     obTryMount();
-    obGhostStart();
   }
 
-  /** Leaving the step (or the wizard): the engine and its ghost both go. */
+  /** The tree the panel shows: the user's own categories when the deck has
+   *  landed, the demo tree until then. */
+  function obTryBuildTree() {
+    const cats = categories.length ? categories : DEMO_CATEGORIES;
+    tryTreeReal = cats !== DEMO_CATEGORIES;
+    tryTree = pickerTree(cats, tryTreeReal);
+  }
+
+  /** The deck landed while the panel was showing the demo tree: swap in the real
+   *  one. Called from the wizard's quiet load; a no-op everywhere else. */
+  function obPreviewRefresh() {
+    if (!tryOpen || tryTreeReal || !categories.length || obStep !== "picker") return;
+    obTryBuildTree();
+    obTryMount();
+  }
+
+  /** Leaving the step (or the wizard): the engine goes. */
   function obPreviewStop() {
-    obGhostStop();
     if (!tryOpen) return;
     tryOpen = false;
     tryEngine?.destroy();
     tryEngine = null;
     tryTree = null;
+    tryTreeReal = false;
     els.obPickerRoot.replaceChildren();
     els.obPickerResult.textContent = "";
-  }
-
-  /** The big button hands the panel over: the ghost retires, the keyboard lands
-   *  on the first target. Everything else was already live. */
-  function obTryHandOver() {
-    obGhostStop();
-    const el = els.obPickerRoot.querySelector(".pk-tile, .pk-sr button");
-    if (el instanceof HTMLElement) el.focus({ preventScroll: true });
   }
 
   /** Mount (or re-mount) the engine for the current sample + variant. The result
@@ -3162,8 +3165,7 @@ function main() {
     tryEngine = null;
     els.obPickerRoot.replaceChildren();
     if ((pickerPref ?? "tiles") === "list") {
-      // the list has nothing to demo inline — it is the sheet they already know
-      obGhostStop();
+      // the list has nothing to try inline — it is the sheet they already know
       const p = document.createElement("p");
       p.className = "settings-info";
       p.textContent = "List is the classic scrolling sheet you'll see on the deck.";
@@ -3178,8 +3180,7 @@ function main() {
       guessId: randomLeaf(tree)?.catId ?? null,
       recentIds: [], // nothing has been picked yet: a "recent" dot here would be a lie
       onPick: obTryPick,
-      onCancel: obGhostStop, // Escape at the top level: the panel stays, the demo doesn't
-      onInteract: obGhostStop, // the first real touch retires the ghost for good
+      onCancel: () => { /* Escape at the top level: the panel simply stays */ },
       deps: { haptic: (ms) => haptic(ms), reducedMotion },
     });
     tryEngine = engine;
@@ -3190,11 +3191,23 @@ function main() {
       els.obPickerResult.textContent = "Cramped on this screen — bigger on the deck";
     }
     tryStart = performance.now();
+    // the chip tap that (re)mounted this must not double as the first pick
     setTimeout(() => { if (tryEngine === engine) engine.arm(); }, 160);
   }
 
+  /** The sample on the table: one of the user's own transactions when the deck
+   *  has landed, a stand-in otherwise. @returns {{merchant: string, amount: number|string, currency: string}|undefined} */
+  function obTrySample() {
+    const own = tryTreeReal ? backlog : [];
+    if (own.length) {
+      const t = own[trySample % own.length];
+      if (t) return { merchant: t.merchant || t.payee || "Unknown", amount: t.amount, currency: t.currency };
+    }
+    return TRY_SAMPLES[trySample % TRY_SAMPLES.length];
+  }
+
   function obTryRenderSample() {
-    const s = TRY_SAMPLES[trySample % TRY_SAMPLES.length];
+    const s = obTrySample();
     els.obPickerSample.replaceChildren();
     const name = document.createElement("span");
     name.textContent = s?.merchant ?? "";
@@ -3216,115 +3229,6 @@ function main() {
     trySample++;
     // the engine keeps its DOM until the hit flash has played
     setTimeout(() => { if (tryOpen) obTryMount(); }, 150);
-    if (ghostOn) obGhostAt(GHOST.beat, obGhostRun); // …and the next sample demos itself
-  }
-
-  // ---- the ghost finger ----------------------------------------------------
-  //
-  // A translucent circle that plays the same picks a finger would, through the
-  // engine's demo API — so what the step shows IS the picker, not an animation
-  // of one. It never counts as input: the engine's onInteract fires on the first
-  // REAL touch and takes the ghost off the screen for the rest of the step.
-
-  /** Beats of one scripted pick, ms. `beat` is the pause after a commit. */
-  const GHOST = { lead: 400, move: 150, press: 40, hold: 700, drag: 170, beat: 1350, watchdog: 4200 };
-
-  /** @param {number} ms @param {() => void} fn */
-  function obGhostAt(ms, fn) {
-    const t = setTimeout(() => {
-      if (ghostOn && tryOpen && obStep === "picker" && onboardingActive) fn();
-    }, ms);
-    ghostTimers.push(t);
-  }
-
-  function obGhostStop() {
-    ghostOn = false;
-    for (const t of ghostTimers) clearTimeout(t);
-    ghostTimers = [];
-    ghostEl?.remove();
-    ghostEl = null;
-  }
-
-  function obGhostStart() {
-    obGhostStop();
-    if ((pickerPref ?? "tiles") === "list") return;
-    ghostOn = true;
-    obGhostAt(GHOST.lead, obGhostRun);
-  }
-
-  /** @param {{x: number, y: number}} pt  root-relative */
-  function obGhostMove(pt) {
-    const g = ghostEl ?? document.createElement("div");
-    if (!ghostEl) {
-      ghostEl = g;
-      g.className = "pk-ghost";
-      g.setAttribute("aria-hidden", "true");
-    }
-    const rr = els.obPickerRoot.getBoundingClientRect();
-    const pr = els.obPickerPanel.getBoundingClientRect();
-    // set the position BEFORE the first append: an appended-then-moved ghost
-    // would slide in from the panel's top-left corner
-    g.style.setProperty("--gx", `${Math.round(pt.x + rr.left - pr.left)}px`);
-    g.style.setProperty("--gy", `${Math.round(pt.y + rr.top - pr.top)}px`);
-    if (g.parentNode !== els.obPickerPanel) els.obPickerPanel.appendChild(g);
-  }
-
-  /** @param {boolean} on */
-  function obGhostPress(on) {
-    ghostEl?.classList.toggle("pk-ghost-press", on);
-  }
-
-  /** One scripted pick: a group, then one of its children — or, every fourth
-   *  round, a one-tap top-level leaf. @returns {{first: string, second: string|null}|null} */
-  function obGhostPlan() {
-    const tree = tryTree ?? [];
-    const groups = tree.filter((n) => n.kind === "group" && n.children.length > 0);
-    const leaves = tree.filter((n) => n.kind === "leaf");
-    ghostTurn++;
-    const leaf = leaves[ghostTurn % Math.max(1, leaves.length)];
-    if (leaf && ghostTurn % 4 === 3) return { first: leaf.key, second: null };
-    const g = groups[ghostTurn % Math.max(1, groups.length)];
-    if (!g || g.kind !== "group") return leaf ? { first: leaf.key, second: null } : null;
-    const c = g.children[(ghostTurn * 3) % g.children.length];
-    return c ? { first: g.key, second: c.key } : null;
-  }
-
-  /** Drives one round; the next one is scheduled by obTryPick's commit. */
-  function obGhostRun() {
-    for (const t of ghostTimers) clearTimeout(t);
-    ghostTimers = [];
-    const engine = tryEngine;
-    const plan = obGhostPlan();
-    if (!engine || !plan) return;
-    const wheel = (pickerPref ?? "tiles") === "wheel";
-    const first = engine.demo.spot(plan.first);
-    if (!first) return;
-    // a round that commits nothing (a variant swapped mid-flight) still restarts
-    obGhostAt(GHOST.watchdog, obGhostRun);
-    obGhostMove(first);
-    obGhostAt(GHOST.move, () => {
-      obGhostPress(true);
-      obGhostAt(GHOST.press, () => {
-        obGhostPress(false);
-        const second = plan.second;
-        if (second === null) { engine.demo.act(plan.first); return; }
-        if (wheel) engine.demo.hold(plan.first); else engine.demo.act(plan.first);
-        obGhostAt(GHOST.hold, () => {
-          const to = engine.demo.spot(second);
-          if (!to) return;
-          obGhostMove(to);
-          obGhostAt(GHOST.move, () => {
-            if (wheel) {
-              engine.demo.slide(second);
-              obGhostAt(GHOST.drag, () => engine.demo.release(second));
-              return;
-            }
-            obGhostPress(true);
-            obGhostAt(GHOST.press, () => { obGhostPress(false); engine.demo.act(second); });
-          });
-        });
-      });
-    });
   }
 
   /** @param {number} catId @returns {{node: PkLeaf, top: boolean}|null} */
@@ -3939,13 +3843,10 @@ function main() {
       if (!(b instanceof HTMLElement) || !b.dataset.picker) return;
       if (!setPickerPref(b.dataset.picker)) return;
       renderPickerRow(els.obPickerRow, pickerPref ?? "tiles", els.obPickerBlurb);
-      els.obPickerBlurb.hidden = true;
-      // a chip is a request to SEE that variant: remount and let the ghost demo it
+      // a chip is a request to SEE that variant: remount the panel on it
       els.obPickerResult.textContent = "";
       obTryMount();
-      obGhostStart();
     });
-    els.obPickerTry.addEventListener("click", obTryHandOver);
     els.obLmInput.addEventListener("input", () => obOnInput("lm"));
     els.obOrInput.addEventListener("input", () => obOnInput("or"));
     els.obLmInput.addEventListener("blur", () => obOnBlur("lm"));
@@ -3975,7 +3876,7 @@ function main() {
       if (b instanceof HTMLElement && b.dataset.tag && toggleSkipTag(Number(b.dataset.tag))) void obLoad({ force: true });
     });
     els.onboard.addEventListener("keydown", (e) => {
-      if (tryOpen) return; // the engine already consumed what it wanted; Enter must not advance
+      if (tryOpen) return; // the try panel is live: Enter belongs to the picker, never to Continue
       // Enter in a token field = Continue (when enabled); radios keep their native keys
       if (e.key !== "Enter" || !(e.target instanceof HTMLInputElement) || e.target.type === "radio") return;
       e.preventDefault();

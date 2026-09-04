@@ -242,9 +242,13 @@ source of truth for transaction data; the device is the source of truth for pend
   configured, else `none`; `own` reveals a key field and a 3-step how-to) → tune ("What to sort?":
   cutoff chips always expanded as "Include transactions for", the per-bucket include checkboxes,
   the skip-tag chips, plus the live in-scope count) →
-  picker (choose the category picker: five chips from `PICKER_META`, a one-line blurb, and a
-  "Try it" button that swaps the step body for a live in-place demo — no nested dialog; the choice
-  persists on selection and `canAdvance` always permits Continue) → done (gesture legend and the
+  picker (choose the category picker: five chips from `PICKER_META`, the chosen variant's blurb,
+  and under them the picker itself, live — mounted on the user's own categories once the quiet deck
+  load has landed (`obPreviewRefresh` swaps the demo tree out when it lands mid-step) and dealing
+  their own transactions as samples; a pick only deals the next sample, nothing reaches Lunch Money.
+  No self-playing demo and no "Try it" button — the earlier ghost-finger preview read as the app
+  clicking itself. No nested dialog; the choice persists on selection and `canAdvance` always
+  permits Continue) → done (gesture legend and the
   music/SFX toggles, which share the `setMusicPref`/`setSfxPref` setters with Settings and are
   repainted from `audioPrefs` on entry). Split so each step fits an iPhone SE without scrolling.
   Shown iff `!tokens.lm || cursor`; resumes at the persisted step, never at `welcome` once a token

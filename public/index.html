@@ -326,15 +326,14 @@
 
     <section class="onboard-step" data-step="picker" hidden>
       <h2 class="ob-title" id="obTitlePicker" tabindex="-1">How do you want to pick categories?</h2>
-      <p class="ob-lead">Two taps: group, then category.</p>
+      <p class="ob-lead">Tap a style, then try it on the sample below — your own categories, nothing is saved.</p>
       <div class="cutoff-row" id="obPickerRow" role="group" aria-label="Picker style"></div>
-      <p class="settings-info" id="obPickerBlurb" hidden></p>
+      <p class="settings-info ob-picker-blurb" id="obPickerBlurb"></p>
       <div class="ob-picker-panel" id="obPickerPanel">
         <div class="ob-picker-sample" id="obPickerSample"></div>
         <div class="ob-picker-root" id="obPickerRoot"></div>
         <div class="ob-picker-result" id="obPickerResult" aria-live="polite"></div>
       </div>
-      <button type="button" class="try-btn" id="obPickerTry" aria-controls="obPickerPanel">Try it yourself</button>
     </section>
 
     <section class="onboard-step" data-step="done" hidden>
