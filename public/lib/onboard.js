@@ -3,10 +3,14 @@
  * Onboarding wizard — pure step/field-state machine, no DOM, no network, no
  * storage. app.js (owner C) drives the dialog off this; lib/store.js owns the
  * `dopo.onboard.v1` cursor persistence, and index.html (owner B) owns the ids.
+ *
+ * `picker` (first run only) is a preference step, not a gate: it has no field, no
+ * network call and no wrong answer, so it always permits Continue. It sits before
+ * `done` so the gesture legend on `done` can describe the picker the user chose.
  */
 
-/** @typedef {"welcome"|"lm"|"or"|"done"} StepId */
-export const STEP_IDS = /** @type {const} */ (["welcome", "lm", "or", "done"]);
+/** @typedef {"welcome"|"lm"|"or"|"picker"|"done"} StepId */
+export const STEP_IDS = /** @type {const} */ (["welcome", "lm", "or", "picker", "done"]);
 
 /**
  * @param {unknown} v
@@ -19,17 +23,18 @@ export function parseStep(v) {
 }
 
 /**
- * The step sequence for a session. First-run is always all four steps; the
+ * The step sequence for a session. First-run is always all five steps; the
  * returning path (Forget tokens) skips straight to re-entering credentials —
  * `or` only reappears when a shared free tier exists, because the user may
  * have had their own key before and must not be silently defaulted onto the
- * shared one.
+ * shared one. The returning path also skips `picker`: the choice is already made
+ * and survives Forget tokens (it is a device preference, not a credential).
  * @param {{returning?: boolean, hasFreeTier?: boolean}} o
  * @returns {StepId[]}
  */
 export function stepsFor(o) {
   if (o.returning) return o.hasFreeTier ? ["lm", "or"] : ["lm"];
-  return ["welcome", "lm", "or", "done"];
+  return ["welcome", "lm", "or", "picker", "done"];
 }
 
 /**
@@ -138,6 +143,14 @@ export function canAdvance(a) {
 
   if (stepId === "welcome") {
     return { canContinue: true, primary: "Connect Lunch Money", secondary: null, showBack, checkFirst: false };
+  }
+
+  // picker is a preference, not a gate: any of the five variants is a valid answer
+  // and one is always preselected. It MUST return before the field machine below —
+  // otherwise a netfail left over from the lm/or steps would relabel its primary
+  // button "Try again" and offer a bogus "Continue anyway".
+  if (stepId === "picker") {
+    return { canContinue: true, primary, secondary: null, showBack, checkFirst: false };
   }
 
   if (stepId === "done") {

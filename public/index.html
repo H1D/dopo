@@ -134,6 +134,11 @@
       uncategorized in Lunch Money until you widen this.</div>
     <div class="cutoff-row" id="cutoffRow" role="group" aria-label="How far back to sort"></div>
     <div class="settings-info" id="cutoffLine"></div>
+    <div class="sheet-section">Category picker</div>
+    <div class="settings-info">How the category sheet lays out when you tap a card.</div>
+    <div class="cutoff-row" id="pickerRow" role="group" aria-label="Picker style"></div>
+    <p class="settings-info" id="pickerInfo"></p>
+    <button type="button" class="ob-cutoff-change" id="pickerTry">Try it</button>
     <div class="sheet-section">Local rules</div>
     <div class="settings-info" id="rulesNote"></div>
     <div id="rulesList"></div>
@@ -222,6 +227,19 @@
           <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</p>
         <p class="field-sub">Costs about $0.06 per 500 transactions, plus $0.0075 each time dopo
           double-checks a merchant on the web (up to 15 checks a session).</p>
+      </div>
+    </section>
+
+    <section class="onboard-step" data-step="picker" hidden>
+      <h2 class="ob-title" id="obTitlePicker" tabindex="-1">How do you want to pick categories?</h2>
+      <p>Two taps: group, then category. Every button keeps its colour so you learn them fast.</p>
+      <div class="cutoff-row" id="obPickerRow" role="group" aria-label="Picker style"></div>
+      <p class="settings-info" id="obPickerBlurb"></p>
+      <button type="button" class="ob-cutoff-change" id="obPickerTry" aria-controls="obPickerPanel">Try it</button>
+      <div class="ob-picker-panel" id="obPickerPanel" hidden>
+        <div class="ob-picker-sample" id="obPickerSample"></div>
+        <div class="ob-picker-root" id="obPickerRoot"></div>
+        <div class="ob-picker-result" id="obPickerResult" aria-live="polite"></div>
       </div>
     </section>
 

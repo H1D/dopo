@@ -27,7 +27,12 @@ import {
   cutoffLoad, cutoffSave, fetchWindow,
   audioLoad, audioSave,
   onboardCursorLoad, onboardCursorSave, onboardCursorClear,
+  pickerLoad, pickerSave, huesLoad, huesSave,
 } from "./lib/store.js";
+import {
+  buildTree, maxLevel, MAX_LEVEL, assignHues, PICKER_META, DEMO_CATEGORIES, labelOf,
+} from "./lib/picker.js";
+import { createPickerUI } from "./lib/pickerui.js";
 import {
   stepsFor, nextStep, prevStep, nextFieldState, FIELD_IDLE, canAdvance, orChoices,
 } from "./lib/onboard.js";
@@ -50,6 +55,10 @@ import { createMusic } from "./lib/music.js";
 /** @typedef {import("./lib/rules.js").Rule} Rule */
 /** @typedef {import("./lib/onboard.js").StepId} StepId */
 /** @typedef {import("./lib/onboard.js").FieldState} FieldState */
+/** @typedef {import("./lib/picker.js").PickerId} PickerId */
+/** @typedef {import("./lib/picker.js").Node} PkNode */
+/** @typedef {import("./lib/picker.js").LeafNode} PkLeaf */
+/** @typedef {import("./lib/pickerui.js").PickerUIHandle} PickerUI */
 /**
  * @typedef {object} UndoState
  * @property {"apply"|"park"} kind
@@ -74,7 +83,9 @@ import { createMusic } from "./lib/music.js";
  * @property {number} dx
  * @property {number} dy
  */
-/** @typedef {{txn: Txn, onPick: (catId: number) => void, onCancel: () => void}} PickerCtx */
+/** `demo` is the Settings preview: the real sheet, but nothing it does is real —
+ *  no queue item, no `recent` entry, no flush.
+ *  @typedef {{txn: Txn, onPick: (catId: number) => void, onCancel: () => void, demo?: boolean}} PickerCtx */
 
 if (typeof document !== "undefined" && typeof window !== "undefined") main();
 
@@ -111,6 +122,10 @@ function main() {
   let rules = rulesLoad();
   let cutoff = cutoffLoad(); // how far back the LM fetch window reaches
   let cutoffDirty = false; // changed in Settings; the deck is redealt on sheet close
+  /** @type {PickerId|null} */
+  let pickerPref = pickerLoad(); // null = never chose; resolvePickerPref() settles it at boot
+  /** @type {Record<string, number>} */
+  let hues = huesLoad(); // node key -> hue 0..359; a failed write degrades to in-memory only
   /** @type {number[]} */
   let recent = /** @type {number[]} */ (lsLoad(LS.recent, []).filter((id) => typeof id === "number")); // recently picked category ids
   /** @type {string[]} */
@@ -205,6 +220,11 @@ function main() {
   let pendingFinalize = null; // queue item whose undo toast was cleared on hidden
   /** @type {PickerCtx|null} */
   let pickerCtx = null;
+  /** @type {PickerUI|null} */
+  let pickerEngine = null; // the sheet's fast picker; null while the list variant is up
+  /** @type {AbortController|null} */
+  let pickerArmAc = null; // cancels a pending arm when the sheet closes before it fires
+  let sheetHandoff = false; // one sheet is handing over to another: skip the all-closed teardown
   /** @type {DragCtx|null} */
   let dragCtx = null;
   let lastHiddenAt = 0;
@@ -248,6 +268,16 @@ function main() {
   let obChoice = null; // AI step radio; nothing pre-selected
   /** @type {ReturnType<typeof setTimeout>|null} */
   let obDebounce = null; // 600 ms after the last keystroke the field validates itself
+  // ---- picker step: the inline "try it" panel
+  let tryOpen = false; // the try panel owns the step body AND the wizard footer
+  /** @type {PickerUI|null} */
+  let tryEngine = null;
+  /** @type {PkNode[]|null} */
+  let tryTree = null; // frozen for the session: a fetch landing mid-try must not swap it
+  let trySample = 0; // index into TRY_SAMPLES; each pick deals the next one
+  let tryStart = 0; // performance.now() of the last mount, for the "· 0.8 s" readout
+  /** @type {{next: boolean, back: boolean, secondary: boolean, secondaryText: string}|null} */
+  let tryChrome = null; // footer state to put back on exit
   /** @type {{lm: Promise<void>|null, or: Promise<void>|null}} */
   const obCheck = { lm: null, or: null }; // in-flight validation per field — Continue awaits it
   let obContinuing = false; // Continue re-entrancy latch (blur-validate + tap + Enter can land together)
@@ -357,6 +387,7 @@ function main() {
     orTokenInput: $input("#orTokenInput"), orTokenHint: $el("#orTokenHint"), orTokenError: $el("#orTokenError"),
     budgetLine: $el("#budgetLine"), webCheckLine: $el("#webCheckLine"), forgetBtn: $btn("#forgetBtn"),
     cutoffRow: $el("#cutoffRow"), cutoffLine: $el("#cutoffLine"),
+    pickerRow: $el("#pickerRow"), pickerInfo: $el("#pickerInfo"), pickerTry: $btn("#pickerTry"),
     rulesNote: $el("#rulesNote"), rulesList: $el("#rulesList"),
     badgeToggle: $input("#badgeToggle"), settingsError: $el("#settingsError"), menuSettings: $btn("#menuSettings"),
     musicToggle: $input("#musicToggle"), sfxToggle: $input("#sfxToggle"),
@@ -368,6 +399,9 @@ function main() {
     obAiGroup: $el("#obAiGroup"), obOrField: $el("#obOrField"),
     obOrInput: $input("#obOrInput"), obOrShow: $btn("#obOrShow"), obOrHint: $el("#obOrHint"), obOrError: $el("#obOrError"),
     obCount: $el("#obCount"), obCutoffChange: $btn("#obCutoffChange"), obCutoffRow: $el("#obCutoffRow"), obCutoffLine: $el("#obCutoffLine"),
+    obPickerRow: $el("#obPickerRow"), obPickerBlurb: $el("#obPickerBlurb"), obPickerTry: $btn("#obPickerTry"),
+    obPickerPanel: $el("#obPickerPanel"), obPickerSample: $el("#obPickerSample"),
+    obPickerRoot: $el("#obPickerRoot"), obPickerResult: $el("#obPickerResult"),
     obNote: $el("#obNote"), obBack: $btn("#obBack"), obSecondary: $btn("#obSecondary"), obNext: $btn("#obNext"),
     webBar: $el("#webBar"), webBarBtn: $btn("#webBarBtn"),
     connChip: $el("#connChip"), staleBanner: $el("#staleBanner"), stuckBanner: $btn("#stuckBanner"),
@@ -1694,18 +1728,25 @@ function main() {
   let sheetHistoryDepth = 0; // hardware back closes the sheet instead of exiting the PWA
   let ignoreNextPop = false;
 
-  /** @param {HTMLElement} sheet */
-  function openSheet(sheet) {
+  /** @param {HTMLElement} sheet @param {{adoptHistory?: boolean}} [opts]  adoptHistory:
+   *  the caller handed over the history entry of the sheet it just closed (Settings ->
+   *  picker demo), so pushing a second one would take two back presses to undo. */
+  function openSheet(sheet, opts = {}) {
     abortDrag(); // a captured pointer must not commit an invisible decision under the backdrop
     pauseUndoClock();
     sheetReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     els.backdrop.hidden = false;
     els.backdrop.classList.remove("closing");
     sheet.hidden = false;
-    try { history.pushState({ dopoSheet: true }, ""); sheetHistoryDepth++; } catch { /* sandboxed */ }
+    if (!opts.adoptHistory) {
+      try { history.pushState({ dopoSheet: true }, ""); sheetHistoryDepth++; } catch { /* sandboxed */ }
+    }
     requestAnimationFrame(() => {
+      // the fast pickers have no ".cat-btn.guess": focus the model guess if the
+      // variant marks one, else the first actionable tile (wheel: its .pk-sr mirror)
+      const guess = sheet.querySelector(".cat-btn.guess, [data-guess], .pk-guess")
+        || sheet.querySelector(".pk-tile, .pk-sr button");
       sheet.classList.add("open");
-      const guess = sheet.querySelector(".cat-btn.guess");
       (guess instanceof HTMLElement ? guess : sheet).focus();
     });
   }
@@ -1721,11 +1762,15 @@ function main() {
    *  history entry is handed to what opens next (the wizard) instead of popped */
   function closeSheet(sheet, opts = {}) {
     if (!opts.keepHistory) consumeSheetHistory();
+    const fast = sheet.classList.contains("pick-fast");
     sheet.classList.remove("open");
     els.backdrop.classList.add("closing");
     setTimeout(() => {
       sheet.hidden = true;
-      if (!sheetOpenNow()) {
+      // body.pick-fast-open shortens the backdrop fade to match; drop it and the
+      // variant classes only once the sheet is hidden, or the slide-out restyles
+      if (fast) clearPickFast();
+      if (!sheetOpenNow() && !sheetHandoff) {
         els.backdrop.hidden = true;
         resumeUndoClock();
         sheetReturnFocus?.focus?.();
@@ -1733,18 +1778,48 @@ function main() {
         maybeShowUpdateToast(); // a suppressed "New version" toast may surface now
         if (pendingSheetResync) { pendingSheetResync = false; scheduleOnlineResync(); } // sheet-blocked online refresh re-arms
       }
-    }, reducedMotion ? 130 : 340);
+    }, sheetCloseMs(sheet));
+  }
+  /** The fast pickers slide in 140 ms; a 340 ms slide-out would undo that. */
+  const sheetCloseMs = (/** @type {HTMLElement} */ sheet) =>
+    reducedMotion ? 130 : sheet.classList.contains("pick-fast") ? 150 : 340;
+  function clearPickFast() {
+    els.pickSheet.classList.remove("pick-fast", "pick-tiles", "pick-cols", "pick-dock", "pick-wheel");
+    document.body.classList.remove("pick-fast-open");
   }
   const sheetOpenNow = () => !!pickerCtx || els.laterSheet.hidden === false ||
     els.acctSheet.hidden === false || els.settingsSheet.hidden === false;
 
   // ---------- picker bottom sheet ----------
-  /** @param {Txn} txn @param {{onPick: (catId: number) => void, onCancel: () => void}} handlers */
-  function openPicker(txn, handlers) {
-    pickerCtx = { txn, ...handlers };
-    const guessId = txn.suggestion?.suggested_category_id ?? null;
-    els.pickTitle.textContent = txn.merchant ? `Sort: ${txn.merchant}` : "Pick a category";
+  /** One tree per open — rebuilding is sub-millisecond and a memoised tree would
+   *  outlive a refetch that renamed or dropped a category. The hue map is grown in
+   *  the same pass so colours stay stable for the life of the install.
+   *  @param {readonly Category[]} cats @param {boolean} [persist]  false for the demo
+   *  tree: nobody's real colours should be shifted by a preview @returns {PkNode[]} */
+  function pickerTree(cats, persist = true) {
+    const tree = buildTree([...cats]);
+    const r = assignHues(tree, hues);
+    if (!persist) return tree; // in-memory only — `hues` itself keeps the real map
+    hues = r.map;
+    // a lost hue write only costs the colours their persistence: never storageFailed()
+    if (r.changed) { try { huesSave(hues); } catch { /* in-memory hues are still right */ } }
+    return tree;
+  }
 
+  /** Why the user is looking at the list after choosing something else. This has to
+   *  live INSIDE the sheet: note() paints at z-index 66, under the backdrop.
+   *  @param {PickerId} variant @param {"level"|"room"} why @returns {string} */
+  function pickerFallbackReason(variant, why) {
+    const title = PICKER_META.find((p) => p.id === variant)?.title.toLowerCase() ?? variant;
+    return why === "level"
+      ? `Too many categories for the ${title} picker — using the list`
+      : `Not enough room for the ${title} picker here — using the list`;
+  }
+
+  /** Today's scrolling sheet, unchanged apart from the optional reason line.
+   *  @param {readonly Category[]} cats @param {number|null} guessId
+   *  @param {string|null} [reason] @returns {string} */
+  function pickerListHtml(cats, guessId, reason = null) {
     /** @param {Category} c @param {boolean} [inRecent] @returns {string} */
     const btn = (c, inRecent = false) => {
       const bits = splitEmoji(c.name);
@@ -1756,6 +1831,7 @@ function main() {
     };
 
     let bodyHtml = "";
+    if (reason) bodyHtml += `<div class="sheet-section">${esc(reason)}</div>`;
     const recents = recent.flatMap((id) => { const c = catById.get(id); return c ? [c] : []; }).slice(0, 8);
     if (recents.length) {
       const chipsHtml = recents.map((c) => btn(c, true)).join("");
@@ -1763,21 +1839,112 @@ function main() {
     }
     /** @type {Map<string, Category[]>} */
     const groups = new Map();
-    for (const c of categories) {
+    for (const c of cats) {
       const g = c.group || "Other";
       const list = groups.get(g) ?? [];
       if (!list.length) groups.set(g, list);
       list.push(c);
     }
-    for (const [g, cats] of groups) {
-      const btnsHtml = cats.map((c) => btn(c)).join("");
+    for (const [g, gcats] of groups) {
+      const btnsHtml = gcats.map((c) => btn(c)).join("");
       bodyHtml += `<div class="sheet-section">${esc(g)}</div>${btnsHtml}`;
     }
-    els.pickBody.innerHTML = bodyHtml;
-    openSheet(els.pickSheet);
+    return bodyHtml;
+  }
+
+  /** The list scrolls, so the guess has to be brought into view. */
+  function scrollPickerGuessIntoView() {
     const guesses = els.pickBody.querySelectorAll(".cat-btn.guess");
     const guessEl = guesses[guesses.length - 1]; // the grouped-list one, not the recent chip
     if (guessEl) setTimeout(() => guessEl.scrollIntoView({ block: "center" }), 60);
+  }
+
+  /** Open the input gate once the sheet has finished sliding: an engine armed
+   *  earlier would take the very tap that opened it. `transitionend` is the real
+   *  signal, 160 ms is the floor, and the 500 ms cap covers the cases where the
+   *  transition is skipped entirely (background tab, reduced motion).
+   *  @param {PickerUI} engine */
+  function armPicker(engine) {
+    const ac = new AbortController();
+    pickerArmAc?.abort();
+    pickerArmAc = ac;
+    let elapsed = false;
+    let slid = false;
+    const tryArm = () => { if (elapsed && slid && !ac.signal.aborted) engine.arm(); };
+    els.pickSheet.addEventListener("transitionend", (e) => {
+      if (e.target !== els.pickSheet) return; // child flashes also bubble a transitionend
+      slid = true;
+      tryArm();
+    }, { signal: ac.signal });
+    setTimeout(() => { elapsed = true; tryArm(); }, 160);
+    setTimeout(() => { elapsed = true; slid = true; tryArm(); }, 500);
+  }
+
+  /** @param {Txn} txn @param {{onPick: (catId: number) => void, onCancel: () => void}} handlers
+   *  @param {{demo?: boolean, adoptHistory?: boolean}} [opts] */
+  function openPicker(txn, handlers, opts = {}) {
+    const demo = opts.demo === true;
+    pickerCtx = { txn, ...handlers, demo };
+    const guessId = txn.suggestion?.suggested_category_id ?? null;
+    const merchant = txn.merchant || "";
+    // "Preview:" is the only thing separating a harmless demo from a real decision
+    els.pickTitle.textContent = merchant
+      ? `${demo ? "Preview" : "Sort"}: ${merchant}`
+      : demo ? "Preview" : "Pick a category";
+    // the Settings preview must show SOMETHING before the first fetch lands
+    const cats = categories.length || !demo ? categories : DEMO_CATEGORIES;
+    clearPickFast();
+
+    /** @type {PickerId} */
+    let variant = pickerPref ?? "list";
+    /** @type {string|null} */
+    let reason = null;
+    if (variant !== "list") {
+      const tree = pickerTree(cats, cats !== DEMO_CATEGORIES);
+      // MAX_LEVEL is checked over the WHOLE tree before mounting: the fallback
+      // decision has to be made once, not when the user drills into group 41
+      if (!tree.length) {
+        variant = "list"; // no categories yet: the empty list says that by itself
+      } else if (maxLevel(tree) > MAX_LEVEL) {
+        reason = pickerFallbackReason(variant, "level");
+        variant = "list";
+      } else {
+        els.pickSheet.classList.add("pick-fast", `pick-${variant}`);
+        document.body.classList.add("pick-fast-open");
+        els.pickBody.innerHTML = "";
+        openSheet(els.pickSheet, { adoptHistory: opts.adoptHistory === true });
+        sheetHandoff = false; // the handover (if any) completed: teardown rules apply again
+        // mounted AFTER the sheet is un-hidden: fits() measures a real box
+        const engine = createPickerUI({
+          root: els.pickBody,
+          variant: /** @type {Exclude<PickerId, "list">} */ (variant),
+          tree,
+          hues,
+          guessId,
+          recentIds: recent.slice(0, 5),
+          onPick: (id) => resolvePicker(id),
+          onCancel: () => resolvePicker(null),
+          deps: { haptic: (ms) => haptic(ms), reducedMotion },
+        });
+        engine.render();
+        if (engine.fits()) {
+          pickerEngine = engine;
+          armPicker(engine);
+          return;
+        }
+        // "these pickers never scroll" is enforced, not assumed: too narrow a
+        // screen for this tree means the list, in the sheet that is already open
+        engine.destroy();
+        clearPickFast();
+        els.pickBody.innerHTML = pickerListHtml(cats, guessId, pickerFallbackReason(variant, "room"));
+        scrollPickerGuessIntoView();
+        return;
+      }
+    }
+    els.pickBody.innerHTML = pickerListHtml(cats, guessId, reason);
+    openSheet(els.pickSheet, { adoptHistory: opts.adoptHistory === true });
+    sheetHandoff = false;
+    scrollPickerGuessIntoView();
   }
 
   /** @param {number|null} catId  null = cancel */
@@ -1785,7 +1952,20 @@ function main() {
     const ctx = pickerCtx;
     if (!ctx) return;
     pickerCtx = null;
+    const engine = pickerEngine;
+    pickerEngine = null;
+    pickerArmAc?.abort();
+    pickerArmAc = null;
+    const closeMs = sheetCloseMs(els.pickSheet);
     closeSheet(els.pickSheet);
+    // the sheet is still sliding out and the engine still owns #pickBody: tearing
+    // it down now would blank the picker mid-animation
+    if (engine) setTimeout(() => engine.destroy(), closeMs);
+    if (ctx.demo) {
+      // a preview decides nothing: no recent entry, no queue item, no flush
+      if (catId != null) ctx.onPick(catId); else ctx.onCancel();
+      return;
+    }
     if (catId != null) {
       recent = [catId, ...recent.filter((id) => id !== catId)];
       lsSave(LS.recent, recent.slice(0, 12));
@@ -1918,6 +2098,121 @@ function main() {
     haptic(8);
   }
 
+  // ---------- settings: category picker ----------
+  /** The default is a statement about EXISTING installs: someone who already has a
+   *  token has muscle memory for the scrolling list, so they keep it and get one
+   *  pointer at Settings. A fresh install starts on tiles. Persisting the resolved
+   *  value is what makes the hint one-time rather than every-boot. */
+  function resolvePickerPref() {
+    if (pickerPref !== null) return;
+    const existing = !!tokens.lm;
+    pickerPref = existing ? "list" : "tiles";
+    try { pickerSave(pickerPref); } catch { /* the hint may repeat next boot; harmless */ }
+    if (existing) note("New: faster category pickers — try them in Settings", 5000);
+  }
+
+  /** Chips + the blurb of the current choice; Settings and the wizard share it.
+   *  @param {HTMLElement} rootEl @param {PickerId} current @param {HTMLElement} blurbEl */
+  function renderPickerRow(rootEl, current, blurbEl) {
+    const chipHtml = (/** @type {{id: string, title: string}} */ p) =>
+      `<button type="button" class="cutoff-chip${p.id === current ? " on" : ""}"
+        data-picker="${esc(p.id)}" aria-pressed="${p.id === current ? "true" : "false"}">${esc(p.title)}</button>`;
+    const chipsHtml = PICKER_META.map(chipHtml).join("");
+    rootEl.innerHTML = chipsHtml;
+    blurbEl.textContent = PICKER_META.find((p) => p.id === current)?.blurb ?? "";
+  }
+
+  /** @param {string} id @returns {boolean} true when the preference actually moved */
+  function setPickerPref(id) {
+    const v = PICKER_META.find((p) => p.id === id)?.id;
+    if (!v || v === pickerPref) return false;
+    pickerPref = v;
+    // a lost write costs the choice its persistence, not the session: no scary toast
+    try { pickerSave(v); } catch { /* session-only then */ }
+    haptic(8);
+    return true;
+  }
+
+  /** Settings "Try it": the honest preview is the real sheet, in demo mode. The
+   *  settings sheet hands over its history entry (keepHistory + adoptHistory) so
+   *  one back press still dismisses exactly one surface. */
+  function openPickerDemo() {
+    if (pickerCtx || els.settingsSheet.hidden) return;
+    disarmForget();
+    const wait = sheetCloseMs(els.settingsSheet);
+    // HANDOVER, not a close: without this the settings sheet's own timeout runs the
+    // "everything is shut" teardown (return focus to the menu, resume the undo clock,
+    // fire the deferred online resync) underneath a preview that is about to open
+    sheetHandoff = true;
+    closeSheet(els.settingsSheet, { keepHistory: true });
+    setTimeout(() => {
+      if (pickerCtx) { sheetHandoff = false; return; }
+      const cats = categories.length ? categories : DEMO_CATEGORIES;
+      const tree = pickerTree(cats, cats !== DEMO_CATEGORIES);
+      const guessId = randomLeaf(tree)?.catId ?? null;
+      const started = performance.now();
+      /** the picker only reads `merchant` and `suggestion`; the rest is shape @type {Txn} */
+      const sample = /** @type {Txn} */ (/** @type {unknown} */ ({
+        id: -1, merchant: "Albert Heijn", payee: "Albert Heijn", amount: 42.17,
+        currency: "eur", date: fmtISODate(new Date()), status: "uncleared", notes: null,
+        category_id: null, plaid_account_id: null, manual_account_id: null,
+        suggestion: { suggested_category_id: guessId, confidence: 0.9, reasoning: "", source: "ai" },
+      }));
+      openPicker(sample, {
+        onPick(catId) {
+          const secs = Math.max(0, (performance.now() - started) / 1000);
+          const bits = splitEmoji(catById.get(catId)?.name ?? leafName(tree, catId));
+          const emojiText = bits.emoji || "🏷";
+          note(`✓ ${emojiText} ${bits.text} · ${secs.toFixed(1)} s · preview, nothing applied`, 3500);
+          afterPickerDemo();
+        },
+        onCancel: afterPickerDemo,
+      }, { demo: true, adoptHistory: true });
+    }, wait);
+  }
+
+  /** The preview came FROM Settings, so it goes back to Settings — landing on the
+   *  deck would look like the preview had done something. A cutoff chip tapped
+   *  before "Try it" is applied only now: a refetch+redeal underneath an open
+   *  picker would pull the deck out from under it. */
+  function afterPickerDemo() {
+    sheetHandoff = true; // the pick sheet is closing INTO the settings sheet
+    const wait = sheetCloseMs(els.pickSheet);
+    setTimeout(() => {
+      sheetHandoff = false;
+      // a normal open (it pushes its own entry): the pick sheet's close already
+      // consumed the one Settings handed forward, so adopting here would leave
+      // the reopened sheet with no history entry and a dead hardware Back
+      openSettingsSheet(null);
+      // openSheet focuses inside a rAF; this one is queued after it, same frame
+      requestAnimationFrame(() => els.pickerTry.focus());
+      if (cutoffDirty) void applyCutoffChange();
+    }, wait);
+  }
+
+  /** @param {Date} d @returns {string} */
+  const fmtISODate = (d) => d.toISOString().slice(0, 10);
+
+  /** @param {PkNode[]} tree @returns {PkLeaf|null} */
+  function randomLeaf(tree) {
+    /** @type {PkLeaf[]} */
+    const leaves = [];
+    for (const n of tree) {
+      if (n.kind === "leaf") leaves.push(n);
+      else leaves.push(...n.children);
+    }
+    return leaves[Math.floor(Math.random() * leaves.length)] ?? null;
+  }
+
+  /** @param {PkNode[]} tree @param {number} catId @returns {string} */
+  function leafName(tree, catId) {
+    for (const n of tree) {
+      if (n.kind === "leaf" && n.catId === catId) return n.name;
+      if (n.kind === "group") for (const c of n.children) if (c.catId === catId) return c.name;
+    }
+    return "Category";
+  }
+
   /** A changed cutoff means a different window entirely: refetch and redeal from
    *  scratch rather than reconcile(), which would preserve a top card that may now
    *  be out of range. */
@@ -1999,8 +2294,9 @@ function main() {
     els.orTokenHint.hidden = !tokens.or && !onFreeTier();
   }
 
-  /** @param {"lm"|"or"|null} deadField  names the token the upstream just rejected */
-  function openSettingsSheet(deadField) {
+  /** @param {"lm"|"or"|null} deadField  names the token the upstream just rejected
+   *  @param {{adoptHistory?: boolean}} [opts]  the picker preview handing the sheet back */
+  function openSettingsSheet(deadField, opts = {}) {
     closeMenu();
     els.lmTokenInput.value = "";
     els.orTokenInput.value = "";
@@ -2016,10 +2312,11 @@ function main() {
     els.musicToggle.checked = audioPrefs.music;
     els.sfxToggle.checked = audioPrefs.sfx;
     renderCutoffRow();
+    renderPickerRow(els.pickerRow, pickerPref ?? "list", els.pickerInfo);
     renderRulesList();
     if (deadField === "lm") setFieldError("lm", "This Lunch Money token stopped working — paste a fresh one.");
     if (deadField === "or") setFieldError("or", "This OpenRouter key stopped working — paste a fresh one.");
-    openSheet(els.settingsSheet);
+    openSheet(els.settingsSheet, { adoptHistory: opts.adoptHistory === true });
     updateWebCheckLine(); // after openSheet: the line only paints while the sheet is visible
     if (tokens.lm && deadField !== "lm") {
       // budget name display; a failure leaves the sheet perfectly usable
@@ -2249,6 +2546,7 @@ function main() {
     if (!onboardingActive) return;
     onboardingActive = false;
     obClearDebounce();
+    obTryClose();
     consumeSheetHistory();
     if (els.onboard.open) els.onboard.close();
     els.obNote.hidden = true;
@@ -2260,10 +2558,12 @@ function main() {
   /** @param {StepId} id @param {{dead?: boolean}} [opts]  dead: the upstream just rejected the saved token */
   function obGoto(id, opts = {}) {
     obClearDebounce();
+    obTryClose(); // any step change leaves try mode, including "picker" -> "picker"
     obStep = id;
     try { onboardCursorSave(id); } catch { storageFailed(); }
     if (id === "lm" || id === "or") obEnterField(id, opts.dead === true);
     if (id === "or") renderAiChoices();
+    if (id === "picker") obEnterPicker();
     obShowPanel(id);
     obRender();
     if (id === "done") obRenderDone();
@@ -2368,6 +2668,7 @@ function main() {
     els.obSecondary.hidden = adv.secondary === null;
     els.obSecondary.textContent = adv.secondary ?? "";
     els.obOrField.hidden = !(obStep === "or" && obChoice === "own");
+    if (tryOpen) obTryChrome(); // the try panel owns Back/Continue/secondary while it is up
   }
 
   /** The AI step's radio group, built with createElement — its copy is data, not markup. */
@@ -2603,6 +2904,151 @@ function main() {
     renderCutoffRow(els.obCutoffRow, els.obCutoffLine);
     haptic(8);
     void loadDeckQuiet({ force: true });
+  }
+
+  // ---------- onboarding: the picker step ----------
+  /** Three merchants, dealt in turn — one pick is not enough to judge a picker,
+   *  and a static sample makes the second pick pure muscle memory. */
+  const TRY_SAMPLES = [
+    { merchant: "Albert Heijn", amount: 42.17, currency: "eur" },
+    { merchant: "NS Reizigers", amount: 8.4, currency: "eur" },
+    { merchant: "Spotify", amount: 11.99, currency: "eur" },
+  ];
+
+  /** Entering the step: chips painted, panel closed. The default is persisted here
+   *  so "never tapped a chip" still leaves a real choice behind. */
+  function obEnterPicker() {
+    if (pickerPref === null) {
+      pickerPref = "tiles";
+      try { pickerSave(pickerPref); } catch { /* session-only then */ }
+    }
+    renderPickerRow(els.obPickerRow, pickerPref, els.obPickerBlurb);
+    els.obPickerPanel.hidden = true;
+    els.obPickerBlurb.hidden = false;
+    els.obPickerTry.hidden = false;
+  }
+
+  /** The footer belongs to the try panel while it is open: Continue and Back would
+   *  both walk off a half-finished experiment. */
+  function obTryChrome() {
+    els.obNext.hidden = true;
+    els.obBack.hidden = true;
+    els.obSecondary.hidden = false;
+    els.obSecondary.textContent = "Back to choices";
+  }
+
+  function obTryOpen() {
+    if (tryOpen || obStep !== "picker" || !onboardingActive) return;
+    tryOpen = true;
+    // frozen for the whole session: a fetch landing mid-try must not swap the tree
+    const cats = categories.length ? categories : DEMO_CATEGORIES;
+    tryTree = pickerTree(cats, cats !== DEMO_CATEGORIES);
+    trySample = 0;
+    els.obPickerBlurb.hidden = true;
+    els.obPickerTry.hidden = true;
+    els.obPickerPanel.hidden = false;
+    els.obPickerResult.textContent = "";
+    tryChrome = {
+      next: !!els.obNext.hidden, back: !!els.obBack.hidden,
+      secondary: !!els.obSecondary.hidden, secondaryText: els.obSecondary.textContent ?? "",
+    };
+    obTryChrome();
+    obTryMount();
+  }
+
+  function obTryClose() {
+    if (!tryOpen) return;
+    tryOpen = false;
+    tryEngine?.destroy();
+    tryEngine = null;
+    tryTree = null;
+    els.obPickerRoot.replaceChildren();
+    els.obPickerResult.textContent = "";
+    els.obPickerPanel.hidden = true;
+    els.obPickerBlurb.hidden = false;
+    els.obPickerTry.hidden = false;
+    els.obNext.hidden = tryChrome?.next ?? false;
+    els.obBack.hidden = tryChrome?.back ?? true;
+    els.obSecondary.hidden = tryChrome?.secondary ?? true;
+    els.obSecondary.textContent = tryChrome?.secondaryText ?? "";
+    tryChrome = null;
+    obRender(); // authoritative: canAdvance decides Back/secondary, not the snapshot
+    if (obStep === "picker" && onboardingActive) els.obPickerTry.focus();
+  }
+
+  /** Mount (or re-mount) the engine for the current sample + variant. The result
+   *  line is deliberately NOT cleared: it is the feedback for the pick that dealt
+   *  this sample. */
+  function obTryMount() {
+    const tree = tryTree ?? [];
+    obTryRenderSample();
+    tryEngine?.destroy();
+    tryEngine = null;
+    els.obPickerRoot.replaceChildren();
+    if ((pickerPref ?? "tiles") === "list") {
+      // the list has nothing to demo inline — it is the sheet they already know
+      const p = document.createElement("p");
+      p.className = "settings-info";
+      p.textContent = "List is the classic scrolling sheet you'll see on the deck.";
+      els.obPickerRoot.appendChild(p);
+      return;
+    }
+    const engine = createPickerUI({
+      root: els.obPickerRoot,
+      variant: /** @type {Exclude<PickerId, "list">} */ (pickerPref ?? "tiles"),
+      tree,
+      hues,
+      guessId: randomLeaf(tree)?.catId ?? null,
+      recentIds: [], // nothing has been picked yet: a "recent" dot here would be a lie
+      onPick: obTryPick,
+      onCancel: obTryClose, // Escape/Backspace at the top level leaves the panel
+      deps: { haptic: (ms) => haptic(ms), reducedMotion },
+    });
+    tryEngine = engine;
+    engine.render();
+    // no fallback here — the point of the panel is to show THIS variant — but the
+    // wizard's box is smaller than the sheet, so say when that is what they're seeing
+    if (!engine.fits() && !els.obPickerResult.textContent) {
+      els.obPickerResult.textContent = "Cramped on this screen — bigger on the deck";
+    }
+    tryStart = performance.now();
+    setTimeout(() => { if (tryEngine === engine) engine.arm(); }, 160);
+  }
+
+  function obTryRenderSample() {
+    const s = TRY_SAMPLES[trySample % TRY_SAMPLES.length];
+    els.obPickerSample.replaceChildren();
+    const name = document.createElement("span");
+    name.textContent = s?.merchant ?? "";
+    const amt = document.createElement("span");
+    amt.className = "ob-picker-amt";
+    amt.textContent = s ? fmtAmountText(s) : "";
+    els.obPickerSample.append(name, amt);
+  }
+
+  /** @param {number} catId */
+  function obTryPick(catId) {
+    const secs = Math.max(0, (performance.now() - tryStart) / 1000);
+    const hit = obTryLeafOf(catId);
+    const label = hit ? labelOf(hit.node, !hit.top) : { emoji: "", text: "Category", mono: "" };
+    const taps = hit && hit.top ? 1 : 2;
+    const emojiText = label.emoji || "🏷";
+    els.obPickerResult.textContent =
+      `✓ ${emojiText} ${label.text} · ${taps} tap${taps === 1 ? "" : "s"} · ${secs.toFixed(1)} s`;
+    trySample++;
+    // the engine keeps its DOM until the hit flash has played
+    setTimeout(() => { if (tryOpen) obTryMount(); }, 150);
+  }
+
+  /** @param {number} catId @returns {{node: PkLeaf, top: boolean}|null} */
+  function obTryLeafOf(catId) {
+    for (const n of tryTree ?? []) {
+      if (n.kind === "leaf" && n.catId === catId) return { node: n, top: true };
+      if (n.kind === "group") {
+        for (const c of n.children) if (c.catId === catId) return { node: c, top: false };
+      }
+    }
+    return null;
   }
 
   /** "Start sorting" / "Done": leave the wizard and put the deck on the table. */
@@ -3121,6 +3567,13 @@ function main() {
       const b = e.target instanceof Element ? e.target.closest("[data-cutoff]") : null;
       if (b instanceof HTMLElement && b.dataset.cutoff) pickCutoff(b.dataset.cutoff);
     });
+    els.pickerRow.addEventListener("click", (e) => {
+      const b = e.target instanceof Element ? e.target.closest("[data-picker]") : null;
+      if (!(b instanceof HTMLElement) || !b.dataset.picker) return;
+      if (!setPickerPref(b.dataset.picker)) return;
+      renderPickerRow(els.pickerRow, pickerPref ?? "list", els.pickerInfo);
+    });
+    els.pickerTry.addEventListener("click", openPickerDemo);
     els.rulesList.addEventListener("click", (e) => {
       const b = e.target instanceof Element ? e.target.closest("[data-rule-del]") : null;
       if (b instanceof HTMLElement && b.dataset.ruleDel) deleteRule(Number(b.dataset.ruleDel));
@@ -3142,7 +3595,18 @@ function main() {
     els.onboard.addEventListener("close", () => { if (onboardingActive && !els.onboard.open) els.onboard.showModal(); });
     els.obNext.addEventListener("click", () => { void obContinue(); });
     els.obBack.addEventListener("click", obBack);
-    els.obSecondary.addEventListener("click", obSecondaryTap);
+    els.obSecondary.addEventListener("click", () => {
+      if (tryOpen) { obTryClose(); return; } // "Back to choices" borrows this slot
+      obSecondaryTap();
+    });
+    els.obPickerRow.addEventListener("click", (e) => {
+      const b = e.target instanceof Element ? e.target.closest("[data-picker]") : null;
+      if (!(b instanceof HTMLElement) || !b.dataset.picker) return;
+      if (!setPickerPref(b.dataset.picker)) return;
+      renderPickerRow(els.obPickerRow, pickerPref ?? "tiles", els.obPickerBlurb);
+      if (tryOpen) { els.obPickerResult.textContent = ""; obTryMount(); } // flip variants in place
+    });
+    els.obPickerTry.addEventListener("click", obTryOpen);
     els.obLmInput.addEventListener("input", () => obOnInput("lm"));
     els.obOrInput.addEventListener("input", () => obOnInput("or"));
     els.obLmInput.addEventListener("blur", () => obOnBlur("lm"));
@@ -3168,6 +3632,7 @@ function main() {
       if (b instanceof HTMLElement && b.dataset.cutoff) obPickCutoff(b.dataset.cutoff);
     });
     els.onboard.addEventListener("keydown", (e) => {
+      if (tryOpen) return; // the engine already consumed what it wanted; Enter must not advance
       // Enter in a token field = Continue (when enabled); radios keep their native keys
       if (e.key !== "Enter" || !(e.target instanceof HTMLInputElement) || e.target.type === "radio") return;
       e.preventDefault();
@@ -3253,12 +3718,17 @@ function main() {
     els.menuRefresh.addEventListener("click", () => { closeMenu(); refresh(); });
 
     document.addEventListener("keydown", (e) => {
+      // BEFORE the wizard bail-out: the inline try panel lives inside the dialog and
+      // its hotkeys are the whole point of trying a keyboard-driven picker
+      if (tryEngine && tryEngine.key(e)) return;
       if (onboardingActive) return; // the dialog's own handler owns Enter; card shortcuts must not fire behind it
       if (sheetOpenNow()) {
         const sheet = pickerCtx ? els.pickSheet
           : els.laterSheet.hidden === false ? els.laterSheet
           : els.settingsSheet.hidden === false ? els.settingsSheet
           : els.acctSheet;
+        // hotkeys, Enter (= model guess) and Backspace/Escape (= back / cancel)
+        if (pickerCtx && pickerEngine && pickerEngine.key(e)) return;
         if (e.key === "Escape") {
           if (pickerCtx) resolvePicker(null);
           else if (els.laterSheet.hidden === false) closeLaterSheet();
@@ -3267,8 +3737,8 @@ function main() {
           return;
         }
         if (e.key === "Tab") { // aria-modal: trap focus inside the sheet
-          const focusables = [...sheet.querySelectorAll("button:not([disabled]), input:not([disabled]), [tabindex='-1']")]
-            .filter((n) => n instanceof HTMLElement);
+          const focusables = [...sheet.querySelectorAll("button:not([disabled]), input:not([disabled]), [tabindex='-1'], [tabindex='0']")]
+            .filter((n) => n instanceof HTMLElement || n instanceof SVGElement);
           const first = focusables[0];
           const last = focusables[focusables.length - 1];
           if (!first || !last) return;
@@ -3299,6 +3769,14 @@ function main() {
     window.addEventListener("popstate", () => {
       if (ignoreNextPop) { ignoreNextPop = false; return; }
       if (onboardingActive) {
+        // the try panel is a surface of its own: back leaves it, not the step
+        if (tryOpen) {
+          obTryClose();
+          if (sheetHistoryDepth > 0) {
+            try { history.pushState({ dopoOb: true }, ""); } catch { /* sandboxed */ }
+          }
+          return;
+        }
         // hardware back = wizard Back; on the first step the entry is spent and the
         // wizard stays — the next back leaves the PWA, same as with no wizard
         if (sheetHistoryDepth > 0) {
@@ -3429,6 +3907,7 @@ function main() {
     renderStack(); // loading skeleton
     updateMeters();
     updateConnUI(); // last session's queue may already warrant the offline chip
+    resolvePickerPref(); // tokens are known by now: existing installs keep the list
 
     // The wizard runs for a first visit (no LM token) and for an interrupted setup
     // (cursor). It triggers the queue replay and the first fetch from its own steps;

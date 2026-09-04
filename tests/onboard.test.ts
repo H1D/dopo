@@ -20,6 +20,11 @@ describe("parseStep", () => {
     for (const id of STEP_IDS) expect(parseStep(id)).toBe(id);
   });
 
+  test("picker is a real step id (a persisted cursor must resume there)", () => {
+    expect(parseStep("picker")).toBe("picker");
+    expect(STEP_IDS.indexOf("picker")).toBe(STEP_IDS.indexOf("done") - 1);
+  });
+
   test("garbage — wrong type, unknown string, empty — parses to null", () => {
     expect(parseStep("bogus")).toBeNull();
     expect(parseStep("")).toBeNull();
@@ -35,8 +40,13 @@ describe("parseStep", () => {
 // ---------------------------------------------------------------------------
 
 describe("stepsFor", () => {
-  test("default (first run): all four steps in order", () => {
-    expect(stepsFor({})).toEqual(["welcome", "lm", "or", "done"]);
+  test("default (first run): all five steps in order, picker just before done", () => {
+    expect(stepsFor({})).toEqual(["welcome", "lm", "or", "picker", "done"]);
+  });
+
+  test("returning users never see the picker step — the choice is a device pref that survives Forget tokens", () => {
+    expect(stepsFor({ returning: true, hasFreeTier: true })).not.toContain("picker");
+    expect(stepsFor({ returning: true, hasFreeTier: false })).not.toContain("picker");
   });
 
   test("returning + hasFreeTier: lm then or (must not silently land on the shared key)", () => {
@@ -59,12 +69,14 @@ describe("nextStep / prevStep bounds", () => {
   test("nextStep walks the sequence and returns null past the end", () => {
     expect(nextStep(steps, "welcome")).toBe("lm");
     expect(nextStep(steps, "lm")).toBe("or");
-    expect(nextStep(steps, "or")).toBe("done");
+    expect(nextStep(steps, "or")).toBe("picker");
+    expect(nextStep(steps, "picker")).toBe("done");
     expect(nextStep(steps, "done")).toBeNull();
   });
 
   test("prevStep walks backward and returns null before the start", () => {
-    expect(prevStep(steps, "done")).toBe("or");
+    expect(prevStep(steps, "done")).toBe("picker");
+    expect(prevStep(steps, "picker")).toBe("or");
     expect(prevStep(steps, "or")).toBe("lm");
     expect(prevStep(steps, "lm")).toBe("welcome");
     expect(prevStep(steps, "welcome")).toBeNull();
@@ -235,6 +247,40 @@ describe("canAdvance", () => {
     });
     expect(netfail.primary).toBe("Try again");
     expect(netfail.secondary).toBe("Continue anyway");
+  });
+
+  test("picker: always continuable, plain Continue, Back available, nothing to check", () => {
+    const a = canAdvance({ stepId: "picker", steps: steps4, field: FIELD_IDLE, saved: false, choice: null, returning: false });
+    expect(a).toEqual({ canContinue: true, primary: "Continue", secondary: null, showBack: true, checkFirst: false });
+  });
+
+  test("picker: a stale lm netfail state must NOT fall through to the field machine", () => {
+    // the user hit a network failure on the lm step, armed past it, and walked on:
+    // the field state is still netfail when the picker step renders.
+    const a = canAdvance({
+      stepId: "picker",
+      steps: steps4,
+      field: { status: "netfail", value: "lm-tok" },
+      saved: true,
+      choice: "own",
+      returning: false,
+    });
+    expect(a.primary).toBe("Continue"); // not "Try again"
+    expect(a.secondary).toBeNull(); // not "Continue anyway"
+    expect(a.canContinue).toBe(true);
+    expect(a.checkFirst).toBe(false);
+
+    // same for a check still in flight — the picker step never says "Checking…"
+    const checking = canAdvance({
+      stepId: "picker",
+      steps: steps4,
+      field: { status: "checking", value: "lm-tok" },
+      saved: false,
+      choice: null,
+      returning: false,
+    });
+    expect(checking.canContinue).toBe(true);
+    expect(checking.primary).toBe("Continue");
   });
 
   test("checking label takes priority even on the last step", () => {

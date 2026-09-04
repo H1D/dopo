@@ -9,7 +9,13 @@
  *   - Later pile POINTERS  dopo.later.v1   (ids; legacy full-txn entries still accepted)
  *   - rules                dopo.rules.v1
  *   - deck cutoff preset   dopo.cutoff.v1
+ *   - audio prefs          dopo.audio.v1
+ *   - music shuffle bag    dopo.music.v1
  *   - onboarding cursor    dopo.onboard.v1 (wizard step id; cleared with the tokens)
+ *   - category picker      dopo.picker.v1  (variant id; a device preference — SURVIVES
+ *                          clearTokens, so re-pasting a token never resets the UI)
+ *   - category hues        dopo.hues.v1    (key -> hue 0..359; what makes category
+ *                          colours learnable, so it survives clearTokens too)
  *
  * IndexedDB (bulk, async): suggestion cache + Later txn bodies (~2000-entry LRU,
  * per-entry writes) + the offline state snapshot. Falls back to in-memory Maps
@@ -24,6 +30,7 @@
 import { isRule } from "./rules.js";
 import { CUTOFF_PRESETS, DEFAULT_CUTOFF, cutoffRange } from "./lm.js";
 import { parseStep } from "./onboard.js";
+import { parsePicker } from "./picker.js";
 
 export const LS_KEYS = {
   tokens: "dopo.tokens.v1",
@@ -34,6 +41,8 @@ export const LS_KEYS = {
   audio: "dopo.audio.v1",
   music: "dopo.music.v1",
   onboard: "dopo.onboard.v1",
+  picker: "dopo.picker.v1",
+  hues: "dopo.hues.v1",
 };
 
 // ---------------------------------------------------------------------------
@@ -344,6 +353,80 @@ export function onboardCursorSave(id) {
 
 export function onboardCursorClear() {
   lsRemove(LS_KEYS.onboard);
+}
+
+// ---------------------------------------------------------------------------
+// category picker — which picker variant, and the persisted per-category hues.
+// Both are DEVICE PREFERENCES, not credentials: clearTokens() deliberately
+// leaves them alone. Re-pasting a token must not reshuffle every colour the
+// user has learned, nor silently move them back to a different picker.
+// ---------------------------------------------------------------------------
+
+/**
+ * @returns {import("./picker.js").PickerId|null}  null when unset or corrupted —
+ *   the caller resolves the default (new installs `tiles`, pre-feature installs
+ *   `list`), which needs to distinguish "never chose" from "chose".
+ */
+export function pickerLoad() {
+  return parsePicker(lsGet(LS_KEYS.picker));
+}
+
+/**
+ * @param {string} id  an unknown variant CLEARS the preference rather than
+ *   persisting garbage that would read back as null on every boot anyway
+ * @throws on storage failure
+ */
+export function pickerSave(id) {
+  const v = parsePicker(id);
+  if (v === null) { lsRemove(LS_KEYS.picker); return; }
+  lsSet(LS_KEYS.picker, v);
+}
+
+/** Hue map cap: enough for any realistic category tree, bounded so a long-lived
+ *  install can't grow the entry without limit (see huesSave). */
+export const HUES_MAX_KEYS = 512;
+
+/**
+ * Persisted hues, keyed by node key (`c:<id>` / `g:<group name>`).
+ * @returns {Record<string, number>}  values are integers 0..359; entries that
+ *   aren't drop out individually — one bad entry must not cost the whole map,
+ *   because losing the map means every colour the user learned changes.
+ */
+export function huesLoad() {
+  const v = lsGet(LS_KEYS.hues);
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return {};
+  /** @type {Record<string, number>} */
+  const out = {};
+  for (const [k, raw] of Object.entries(/** @type {Record<string, unknown>} */ (v))) {
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0 || raw > 359) continue;
+    out[k] = raw;
+  }
+  return out;
+}
+
+/**
+ * @param {Record<string, number>} map  non-finite / non-number values are dropped;
+ *   finite ones are rounded and WRAPPED into 0..359 rather than dropped — a hue is
+ *   an angle, and dropping a key would silently recolour that category on the next
+ *   load, which is exactly the thing this map exists to prevent. Over the cap the
+ *   OLDEST insertion-order keys go first (a snapshot boot sees a subset of the
+ *   tree, so pruning by "not in the current tree" would be wrong).
+ * @throws on storage failure — callers may degrade to in-memory hues
+ */
+export function huesSave(map) {
+  /** @type {Record<string, number>} */
+  const clean = {};
+  if (typeof map === "object" && map !== null) {
+    for (const [k, raw] of Object.entries(map)) {
+      if (typeof raw !== "number" || !Number.isFinite(raw)) continue;
+      clean[k] = ((Math.round(raw) % 360) + 360) % 360;
+    }
+  }
+  const keys = Object.keys(clean);
+  if (keys.length > HUES_MAX_KEYS) {
+    for (const k of keys.slice(0, keys.length - HUES_MAX_KEYS)) delete clean[k];
+  }
+  lsSet(LS_KEYS.hues, clean);
 }
 
 // ---------------------------------------------------------------------------
