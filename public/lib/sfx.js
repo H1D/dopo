@@ -13,10 +13,56 @@
  * own that. The master DynamicsCompressor is configured as a LIMITER (high
  * threshold, steep ratio) — clip insurance when a thud lands mid-fanfare —
  * NOT as a leveler, which would audibly duck the music on every effect.
+ *
+ * Decision blips are weighted by the same heft() signal the dust uses, so a
+ * rent payment drops with more mass than a coffee. dropParams() holds that
+ * mapping as pure arithmetic — importable and unit-testable without an
+ * AudioContext; everything below it is graph-building.
  */
+
+import { QUAKE_AT } from "./dust.js";
 
 export const MUSIC_VOL = 0.4;
 export const SFX_VOL = 0.7;
+
+// Swipe zap pitches: the three actions get distinct bases so the ear learns
+// them — accept highest, pick middle, park lowest.
+export const SWIPE_HZ = { accept: 880, pick: 660, park: 440 };
+
+/**
+ * Heft at or below this is an ordinary transaction: it drops with exactly the
+ * pre-weight blip and nothing else. The weight curve is re-normalized above
+ * the floor rather than applied from 0, so the common case is untouched and
+ * the whole expressive range is spent on the cards that actually feel big.
+ */
+const DROP_FLOOR = 0.3;
+
+/** @param {number} n @returns {number} 0..1, NaN-safe */
+const clamp01 = (n) => (Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0);
+
+/**
+ * How a decision should sound for a transaction of this weight. Pure.
+ *
+ * @param {"accept"|"pick"|"park"} kind
+ * @param {number} [weight] heft() 0..1 of the card being dropped
+ * @returns {{hz: number, ms: number, thump: number, rumble: number}}
+ *   hz/ms shape the zap itself; thump 0..1 is how much low drop layer to mix
+ *   under it; rumble 0..1 is the sub tail, 0 below the quake threshold. The
+ *   tail steps in at 0.4 rather than from zero on purpose — it shares
+ *   QUAKE_AT with the screen shake, and a threshold event that fades in
+ *   inaudibly is just a threshold nobody hears.
+ */
+export function dropParams(kind, weight = 0) {
+  const base = SWIPE_HZ[kind] ?? SWIPE_HZ.pick;
+  const w = clamp01(weight);
+  const heavy = w <= DROP_FLOOR ? 0 : (w - DROP_FLOOR) / (1 - DROP_FLOOR);
+  return {
+    hz: base * (1 - 0.35 * heavy),
+    ms: 70 + 60 * heavy,
+    thump: heavy,
+    rumble: w < QUAKE_AT ? 0 : 0.4 + 0.6 * ((w - QUAKE_AT) / (1 - QUAKE_AT)),
+  };
+}
 
 /**
  * @typedef {object} AudioBus
@@ -156,17 +202,33 @@ export function createSfx(bus) {
   /** @param {() => void} fn  every effect is additive-only */
   const safe = (fn) => { try { fn(); } catch { /* additive only */ } };
 
-  // Swipe zap pitches: the three actions get distinct bases so the ear learns
-  // them — accept highest, pick middle, park lowest.
-  const SWIPE_HZ = { accept: 880, pick: 660, park: 440 };
-
   return {
-    /** Decision blip: 60ms square zap with a fast downward pitch slide.
-     * @param {"accept"|"pick"|"park"} kind */
-    swipe(kind) {
+    /**
+     * Decision blip: a square zap with a fast downward pitch slide, plus — for
+     * a heavy transaction — the sound of something with mass hitting the floor.
+     * At weight 0 this is bit-for-bit the old 70ms zap.
+     *
+     * Layers, all under ~240ms total so the next card is never sung over:
+     *   zap    lower and a touch longer as weight grows
+     *   drop   triangle sweeping 120→45Hz with a noise tick, mixed by `thump`
+     *   tail   a sine sub past QUAKE_AT — the audible half of the screen shake
+     *
+     * @param {"accept"|"pick"|"park"} kind
+     * @param {number} [weight] heft() 0..1 of the transaction being decided
+     */
+    swipe(kind, weight = 0) {
       safe(() => {
-        const f = SWIPE_HZ[kind] ?? 660;
-        voice("square", f * 1.5, 0.22, 0.07, f, 30);
+        const { hz, ms, thump, rumble } = dropParams(kind, weight);
+        voice("square", hz * 1.5, 0.22, ms / 1000, hz, 30);
+        if (thump > 0) {
+          // The tick is what makes it read as an impact on a phone speaker,
+          // which reproduces none of the sweep below it.
+          noiseVoice("lowpass", 400, 0.7, 0.06 * thump, 0.035);
+          voice("triangle", 120, 0.1 + 0.14 * thump, 0.14, 45, 140);
+        }
+        // Offset behind the drop: a sub that starts with it reads as one fat
+        // note, one that follows reads as the floor still moving.
+        if (rumble > 0) voice("sine", 48, 0.06 + 0.08 * rumble, 0.16, 0, 0, 0.06);
       });
     },
 

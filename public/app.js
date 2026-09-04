@@ -276,8 +276,13 @@ function main() {
   let tryTree = null; // frozen for the session: a fetch landing mid-try must not swap it
   let trySample = 0; // index into TRY_SAMPLES; each pick deals the next one
   let tryStart = 0; // performance.now() of the last mount, for the "· 0.8 s" readout
-  /** @type {{next: boolean, back: boolean, secondary: boolean, secondaryText: string}|null} */
-  let tryChrome = null; // footer state to put back on exit
+  // ---- the ghost finger that demonstrates the picker on the onboarding step
+  /** @type {HTMLElement|null} */
+  let ghostEl = null;
+  /** @type {ReturnType<typeof setTimeout>[]} */
+  let ghostTimers = [];
+  let ghostOn = false; // false the instant the user touches the panel, for the rest of the step
+  let ghostTurn = 0; // rotates the demonstrated group/child so it never repeats itself
   /** @type {{lm: Promise<void>|null, or: Promise<void>|null}} */
   const obCheck = { lm: null, or: null }; // in-flight validation per field — Continue awaits it
   let obContinuing = false; // Continue re-entrancy latch (blur-validate + tap + Enter can land together)
@@ -1115,7 +1120,8 @@ function main() {
     startUndo(u);
     updateStreakUI(true);
     haptic(12);
-    fx()?.swipe(u.kind === "park" ? "park" : u.viaPicker ? "pick" : "accept");
+    // heavier transactions land heavier: the drop layer scales with the same heft the dust uses
+    fx()?.swipe(u.kind === "park" ? "park" : u.viaPicker ? "pick" : "accept", heft(u.txn.amount, amountRef));
     if (decisions % 10 === 0) { confetti(90); haptic([14, 50, 14]); fx()?.streak(); }
   }
 
@@ -2554,7 +2560,7 @@ function main() {
     if (!onboardingActive) return;
     onboardingActive = false;
     obClearDebounce();
-    obTryClose();
+    obPreviewStop();
     consumeSheetHistory();
     if (els.onboard.open) els.onboard.close();
     els.obNote.hidden = true;
@@ -2566,7 +2572,7 @@ function main() {
   /** @param {StepId} id @param {{dead?: boolean}} [opts]  dead: the upstream just rejected the saved token */
   function obGoto(id, opts = {}) {
     obClearDebounce();
-    obTryClose(); // any step change leaves try mode, including "picker" -> "picker"
+    obPreviewStop(); // any step change tears the preview down, including "picker" -> "picker"
     obStep = id;
     try { onboardCursorSave(id); } catch { storageFailed(); }
     if (id === "lm" || id === "or") obEnterField(id, opts.dead === true);
@@ -2684,7 +2690,6 @@ function main() {
     els.obSecondary.hidden = adv.secondary === null;
     els.obSecondary.textContent = adv.secondary ?? "";
     els.obOrField.hidden = !(obStep === "or" && obChoice === "own");
-    if (tryOpen) obTryChrome(); // the try panel owns Back/Continue/secondary while it is up
   }
 
   /** The AI step's radio group, built with createElement — its copy is data, not markup. */
@@ -2929,48 +2934,41 @@ function main() {
     { merchant: "Spotify", amount: 11.99, currency: "eur" },
   ];
 
-  /** Entering the step: chips painted, panel closed. The default is persisted here
-   *  so "never tapped a chip" still leaves a real choice behind. */
+  /** Entering the step: chips painted, then the preview starts demonstrating
+   *  itself. The default is persisted here so "never tapped a chip" still leaves
+   *  a real choice behind. */
   function obEnterPicker() {
     if (pickerPref === null) {
       pickerPref = "tiles";
       try { pickerSave(pickerPref); } catch { /* session-only then */ }
     }
     renderPickerRow(els.obPickerRow, pickerPref, els.obPickerBlurb);
-    els.obPickerPanel.hidden = true;
-    els.obPickerBlurb.hidden = false;
-    els.obPickerTry.hidden = false;
+    els.obPickerBlurb.hidden = true; // the live preview says more than the blurb did
+    // the panel is measured on mount (fits(), grid columns, ghost coordinates) and
+    // obShowPanel only unhides this step AFTER us — so start on the next frame
+    requestAnimationFrame(() => {
+      if (obStep === "picker" && onboardingActive) obPreviewStart();
+    });
   }
 
-  /** The footer belongs to the try panel while it is open: Continue and Back would
-   *  both walk off a half-finished experiment. */
-  function obTryChrome() {
-    els.obNext.hidden = true;
-    els.obBack.hidden = true;
-    els.obSecondary.hidden = false;
-    els.obSecondary.textContent = "Back to choices";
-  }
-
-  function obTryOpen() {
-    if (tryOpen || obStep !== "picker" || !onboardingActive) return;
-    tryOpen = true;
-    // frozen for the whole session: a fetch landing mid-try must not swap the tree
-    const cats = categories.length ? categories : DEMO_CATEGORIES;
-    tryTree = pickerTree(cats, cats !== DEMO_CATEGORIES);
-    trySample = 0;
-    els.obPickerBlurb.hidden = true;
-    els.obPickerTry.hidden = true;
-    els.obPickerPanel.hidden = false;
-    els.obPickerResult.textContent = "";
-    tryChrome = {
-      next: !!els.obNext.hidden, back: !!els.obBack.hidden,
-      secondary: !!els.obSecondary.hidden, secondaryText: els.obSecondary.textContent ?? "",
-    };
-    obTryChrome();
+  /** Mount the engine and set the ghost finger going. Idempotent per step. */
+  function obPreviewStart() {
+    if (obStep !== "picker" || !onboardingActive) return;
+    if (!tryOpen) {
+      tryOpen = true;
+      // frozen for the whole session: a fetch landing mid-preview must not swap the tree
+      const cats = categories.length ? categories : DEMO_CATEGORIES;
+      tryTree = pickerTree(cats, cats !== DEMO_CATEGORIES);
+      trySample = 0;
+      els.obPickerResult.textContent = "";
+    }
     obTryMount();
+    obGhostStart();
   }
 
-  function obTryClose() {
+  /** Leaving the step (or the wizard): the engine and its ghost both go. */
+  function obPreviewStop() {
+    obGhostStop();
     if (!tryOpen) return;
     tryOpen = false;
     tryEngine?.destroy();
@@ -2978,16 +2976,14 @@ function main() {
     tryTree = null;
     els.obPickerRoot.replaceChildren();
     els.obPickerResult.textContent = "";
-    els.obPickerPanel.hidden = true;
-    els.obPickerBlurb.hidden = false;
-    els.obPickerTry.hidden = false;
-    els.obNext.hidden = tryChrome?.next ?? false;
-    els.obBack.hidden = tryChrome?.back ?? true;
-    els.obSecondary.hidden = tryChrome?.secondary ?? true;
-    els.obSecondary.textContent = tryChrome?.secondaryText ?? "";
-    tryChrome = null;
-    obRender(); // authoritative: canAdvance decides Back/secondary, not the snapshot
-    if (obStep === "picker" && onboardingActive) els.obPickerTry.focus();
+  }
+
+  /** The big button hands the panel over: the ghost retires, the keyboard lands
+   *  on the first target. Everything else was already live. */
+  function obTryHandOver() {
+    obGhostStop();
+    const el = els.obPickerRoot.querySelector(".pk-tile, .pk-sr button");
+    if (el instanceof HTMLElement) el.focus({ preventScroll: true });
   }
 
   /** Mount (or re-mount) the engine for the current sample + variant. The result
@@ -3001,6 +2997,7 @@ function main() {
     els.obPickerRoot.replaceChildren();
     if ((pickerPref ?? "tiles") === "list") {
       // the list has nothing to demo inline — it is the sheet they already know
+      obGhostStop();
       const p = document.createElement("p");
       p.className = "settings-info";
       p.textContent = "List is the classic scrolling sheet you'll see on the deck.";
@@ -3015,7 +3012,8 @@ function main() {
       guessId: randomLeaf(tree)?.catId ?? null,
       recentIds: [], // nothing has been picked yet: a "recent" dot here would be a lie
       onPick: obTryPick,
-      onCancel: obTryClose, // Escape/Backspace at the top level leaves the panel
+      onCancel: obGhostStop, // Escape at the top level: the panel stays, the demo doesn't
+      onInteract: obGhostStop, // the first real touch retires the ghost for good
       deps: { haptic: (ms) => haptic(ms), reducedMotion },
     });
     tryEngine = engine;
@@ -3052,6 +3050,115 @@ function main() {
     trySample++;
     // the engine keeps its DOM until the hit flash has played
     setTimeout(() => { if (tryOpen) obTryMount(); }, 150);
+    if (ghostOn) obGhostAt(GHOST.beat, obGhostRun); // …and the next sample demos itself
+  }
+
+  // ---- the ghost finger ----------------------------------------------------
+  //
+  // A translucent circle that plays the same picks a finger would, through the
+  // engine's demo API — so what the step shows IS the picker, not an animation
+  // of one. It never counts as input: the engine's onInteract fires on the first
+  // REAL touch and takes the ghost off the screen for the rest of the step.
+
+  /** Beats of one scripted pick, ms. `beat` is the pause after a commit. */
+  const GHOST = { lead: 400, move: 150, press: 40, hold: 700, drag: 170, beat: 1350, watchdog: 4200 };
+
+  /** @param {number} ms @param {() => void} fn */
+  function obGhostAt(ms, fn) {
+    const t = setTimeout(() => {
+      if (ghostOn && tryOpen && obStep === "picker" && onboardingActive) fn();
+    }, ms);
+    ghostTimers.push(t);
+  }
+
+  function obGhostStop() {
+    ghostOn = false;
+    for (const t of ghostTimers) clearTimeout(t);
+    ghostTimers = [];
+    ghostEl?.remove();
+    ghostEl = null;
+  }
+
+  function obGhostStart() {
+    obGhostStop();
+    if ((pickerPref ?? "tiles") === "list") return;
+    ghostOn = true;
+    obGhostAt(GHOST.lead, obGhostRun);
+  }
+
+  /** @param {{x: number, y: number}} pt  root-relative */
+  function obGhostMove(pt) {
+    const g = ghostEl ?? document.createElement("div");
+    if (!ghostEl) {
+      ghostEl = g;
+      g.className = "pk-ghost";
+      g.setAttribute("aria-hidden", "true");
+    }
+    const rr = els.obPickerRoot.getBoundingClientRect();
+    const pr = els.obPickerPanel.getBoundingClientRect();
+    // set the position BEFORE the first append: an appended-then-moved ghost
+    // would slide in from the panel's top-left corner
+    g.style.setProperty("--gx", `${Math.round(pt.x + rr.left - pr.left)}px`);
+    g.style.setProperty("--gy", `${Math.round(pt.y + rr.top - pr.top)}px`);
+    if (g.parentNode !== els.obPickerPanel) els.obPickerPanel.appendChild(g);
+  }
+
+  /** @param {boolean} on */
+  function obGhostPress(on) {
+    ghostEl?.classList.toggle("pk-ghost-press", on);
+  }
+
+  /** One scripted pick: a group, then one of its children — or, every fourth
+   *  round, a one-tap top-level leaf. @returns {{first: string, second: string|null}|null} */
+  function obGhostPlan() {
+    const tree = tryTree ?? [];
+    const groups = tree.filter((n) => n.kind === "group" && n.children.length > 0);
+    const leaves = tree.filter((n) => n.kind === "leaf");
+    ghostTurn++;
+    const leaf = leaves[ghostTurn % Math.max(1, leaves.length)];
+    if (leaf && ghostTurn % 4 === 3) return { first: leaf.key, second: null };
+    const g = groups[ghostTurn % Math.max(1, groups.length)];
+    if (!g || g.kind !== "group") return leaf ? { first: leaf.key, second: null } : null;
+    const c = g.children[(ghostTurn * 3) % g.children.length];
+    return c ? { first: g.key, second: c.key } : null;
+  }
+
+  /** Drives one round; the next one is scheduled by obTryPick's commit. */
+  function obGhostRun() {
+    for (const t of ghostTimers) clearTimeout(t);
+    ghostTimers = [];
+    const engine = tryEngine;
+    const plan = obGhostPlan();
+    if (!engine || !plan) return;
+    const wheel = (pickerPref ?? "tiles") === "wheel";
+    const first = engine.demo.spot(plan.first);
+    if (!first) return;
+    // a round that commits nothing (a variant swapped mid-flight) still restarts
+    obGhostAt(GHOST.watchdog, obGhostRun);
+    obGhostMove(first);
+    obGhostAt(GHOST.move, () => {
+      obGhostPress(true);
+      obGhostAt(GHOST.press, () => {
+        obGhostPress(false);
+        const second = plan.second;
+        if (second === null) { engine.demo.act(plan.first); return; }
+        if (wheel) engine.demo.hold(plan.first); else engine.demo.act(plan.first);
+        obGhostAt(GHOST.hold, () => {
+          const to = engine.demo.spot(second);
+          if (!to) return;
+          obGhostMove(to);
+          obGhostAt(GHOST.move, () => {
+            if (wheel) {
+              engine.demo.slide(second);
+              obGhostAt(GHOST.drag, () => engine.demo.release(second));
+              return;
+            }
+            obGhostPress(true);
+            obGhostAt(GHOST.press, () => { obGhostPress(false); engine.demo.act(second); });
+          });
+        });
+      });
+    });
   }
 
   /** @param {number} catId @returns {{node: PkLeaf, top: boolean}|null} */
@@ -3640,18 +3747,19 @@ function main() {
     els.onboard.addEventListener("close", () => { if (onboardingActive && !els.onboard.open) els.onboard.showModal(); });
     els.obNext.addEventListener("click", () => { void obContinue(); });
     els.obBack.addEventListener("click", obBack);
-    els.obSecondary.addEventListener("click", () => {
-      if (tryOpen) { obTryClose(); return; } // "Back to choices" borrows this slot
-      obSecondaryTap();
-    });
+    els.obSecondary.addEventListener("click", obSecondaryTap);
     els.obPickerRow.addEventListener("click", (e) => {
       const b = e.target instanceof Element ? e.target.closest("[data-picker]") : null;
       if (!(b instanceof HTMLElement) || !b.dataset.picker) return;
       if (!setPickerPref(b.dataset.picker)) return;
       renderPickerRow(els.obPickerRow, pickerPref ?? "tiles", els.obPickerBlurb);
-      if (tryOpen) { els.obPickerResult.textContent = ""; obTryMount(); } // flip variants in place
+      els.obPickerBlurb.hidden = true;
+      // a chip is a request to SEE that variant: remount and let the ghost demo it
+      els.obPickerResult.textContent = "";
+      obTryMount();
+      obGhostStart();
     });
-    els.obPickerTry.addEventListener("click", obTryOpen);
+    els.obPickerTry.addEventListener("click", obTryHandOver);
     els.obLmInput.addEventListener("input", () => obOnInput("lm"));
     els.obOrInput.addEventListener("input", () => obOnInput("or"));
     els.obLmInput.addEventListener("blur", () => obOnBlur("lm"));
@@ -3791,14 +3899,6 @@ function main() {
     window.addEventListener("popstate", () => {
       if (ignoreNextPop) { ignoreNextPop = false; return; }
       if (onboardingActive) {
-        // the try panel is a surface of its own: back leaves it, not the step
-        if (tryOpen) {
-          obTryClose();
-          if (sheetHistoryDepth > 0) {
-            try { history.pushState({ dopoOb: true }, ""); } catch { /* sandboxed */ }
-          }
-          return;
-        }
         // hardware back = wizard Back; on the first step the entry is spent and the
         // wizard stays — the next back leaves the PWA, same as with no wizard
         if (sheetHistoryDepth > 0) {

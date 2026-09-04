@@ -23,6 +23,13 @@
  *     for ~150ms while the sheet slides out, and a second tap in that window
  *     must not categorize twice.
  *
+ * The wheel additionally paints two things no other variant needs: a `pk-lens`
+ * chip riding above the finger (the finger covers the wedge it is choosing) and
+ * a hue tint on the hub, both in the hovered node's own colour. And `demo` runs
+ * the very same internal handlers on a script, so the onboarding step can
+ * demonstrate the real picker instead of an animation of one — it never trips
+ * onInteract, which fires once on the first genuine input.
+ *
  * Only the wheel redraws partially: opening a group swaps the outer ring's
  * children (and the mirrored .pk-sr buttons) but keeps the <svg> element
  * itself, so the pointer capture taken on pointerdown survives the drag.
@@ -54,6 +61,19 @@ import { gridCols, labelOf, renderCols, renderDock, renderTiles, renderWheel, wh
  * @property {(catId: number) => void} onPick
  * @property {() => void} onCancel
  * @property {PickerUIDeps} deps
+ * @property {(() => void)} [onInteract] fired ONCE, on the first real armed input
+ */
+
+/**
+ * Scripted playback of the same internal handlers a finger runs, for the
+ * onboarding preview's ghost finger. Nothing here is user input: it never trips
+ * onInteract and never buzzes, but every class, redraw and flash is identical.
+ * @typedef {object} PickerDemo
+ * @property {(key: string) => {x: number, y: number}|null} spot  centre of a target, root-relative px
+ * @property {(key: string) => void} act       one tap: press flash, then open or commit
+ * @property {(key: string) => void} hold      wheel: press + open the group under the finger
+ * @property {(key: string) => void} slide     wheel: drag the finger onto another wedge
+ * @property {(key: string) => void} release   wheel: lift, committing a leaf
  */
 
 /**
@@ -64,10 +84,15 @@ import { gridCols, labelOf, renderCols, renderDock, renderTiles, renderWheel, wh
  * @property {(e: KeyboardEvent) => boolean} key   true when the event was consumed
  * @property {(v: PickerVariant) => void} setVariant
  * @property {() => boolean} fits       every tap target >= 44px and nothing overflows
+ * @property {PickerDemo} demo
  */
 
 /** Press flash. Short enough to read as "instant", long enough to see. */
 const PRESS_MS = 40;
+/** Hover tick while dragging the wheel: one per wedge crossed, never per move. */
+const TICK_MS = 4;
+/** Level change (a group opening or its fan collapsing) — a beat longer. */
+const LEVEL_MS = 8;
 /** Live-region text is set on a delay so screen readers see a real mutation. */
 const ANNOUNCE_MS = 30;
 /** Ignore taps this close to the screen edges — that is the OS back-swipe. */
@@ -78,6 +103,8 @@ const MIN_TAP = 44;
 const MIN_ARC = 32;
 /** The wheel's viewBox is -102..102 on both axes. */
 const WHEEL_BOX = 204;
+/** How far above the finger the lens chip rides, in CSS px. */
+const LENS_LIFT = 64;
 
 /** Monotonic mount counter behind PickerUIHandle.destroy()'s ownership check. */
 let mountSeq = 0;
@@ -101,6 +128,12 @@ export function createPickerUI(opts) {
   let geom = /** @type {ReturnType<typeof wheelGeometry>|null} */ (null);
   /** Centre label to restore when the wheel hover clears. */
   let centerText = "";
+  /** Wheel only: the chip riding above the finger. Built on first hover. */
+  let lens = /** @type {HTMLElement|null} */ (null);
+  /** Wheel only: last pointer position, root-relative, for the lens. */
+  let lensPt = /** @type {{x: number, y: number}|null} */ (null);
+  /** Lens size, re-measured only when its text changes — see paintLens(). */
+  let lensBox = { w: 120, h: 34 };
 
   /** Identity of THIS mount, stamped on the root so a deferred destroy() can
    *  tell whether the root still belongs to it. */
@@ -115,6 +148,10 @@ export function createPickerUI(opts) {
   let dragging = false;
   let downCenter = false;
   let capturedId = /** @type {number|null} */ (null);
+  /** onInteract is a one-shot: the host uses it to retire a scripted demo. */
+  let interacted = false;
+  /** True while a demo.* call runs: those are not input and must not buzz. */
+  let scripted = false;
 
   /** Pointers that were already down when the engine mounted. @type {Set<number>} */
   const preArm = new Set();
@@ -142,6 +179,19 @@ export function createPickerUI(opts) {
       if (!destroyed) fn();
     }, ms);
     timers.add(t);
+  }
+
+  /** @param {number} ms  vibrate() is a no-op on iOS and may throw in a sandbox */
+  function buzz(ms) {
+    if (scripted) return;
+    try { deps.haptic(ms); } catch { /* additive only */ }
+  }
+
+  /** First real input of this mount: the host stops its ghost finger on it. */
+  function userActed() {
+    if (scripted || interacted) return;
+    interacted = true;
+    try { opts.onInteract?.(); } catch { /* the host's problem, not the picker's */ }
   }
 
   /** @param {string} msg */
@@ -317,9 +367,25 @@ export function createPickerUI(opts) {
     const msg = tile?.getAttribute("aria-label") || labelOf(g, false).text;
     groupKey = g.key;
     hoverKey = null;
-    if (variant === "wheel") redrawWheel(g.key); else render();
+    if (variant === "wheel") { redrawWheel(g.key); buzz(LEVEL_MS); } else render();
     announce(msg);
-    focusFirstChild(g);
+    if (!scripted) focusFirstChild(g);   // a demo must not yank focus off the page
+  }
+
+  /**
+   * Wheel: the finger left the open group and is now over a TOP-LEVEL leaf. The
+   * fan belongs to a group the user has visibly moved on from, so it goes at
+   * once — otherwise the leaf under the finger stays dimmed behind a stale ring
+   * and looks unpickable, even though lifting there commits it.
+   * @param {string} leafKey
+   */
+  function closeFan(leafKey) {
+    groupKey = null;
+    hoverKey = null;
+    redrawWheel(null);          // clears wheelHover, so the hover is set after
+    buzz(LEVEL_MS);
+    setWheelHover(leafKey);
+    announce("Back to groups");
   }
 
   /** @param {PkGroup} g */
@@ -388,15 +454,106 @@ export function createPickerUI(opts) {
     return p ? wheelHit(geom, p.rad, p.ang) : null;
   }
 
-  /** @param {string|null} k */
+  /**
+   * The single highlight path. `pk-hov` alone was invisible on the outer ring:
+   * a group's children sit within a couple of degrees of hue of each other, so
+   * a brightness bump on one of ten near-identical wedges reads as nothing —
+   * and a hovered TOP-LEVEL leaf still carried `pk-dim` from the open fan,
+   * which cancelled the bump outright. The wedge under the finger now also
+   * pushes its own ring's siblings back (`pk-dull`), tints the hub and raises
+   * the lens chip, so the current pick is unmistakable at a glance.
+   * @param {string|null} k
+   */
   function setWheelHover(k) {
     if (wheelHover === k) return;
     wheelHover = k;
-    for (const p of root.querySelectorAll(".pk-wedge")) p.classList.toggle("pk-hov", k !== null && p.getAttribute("data-key") === k);
-    const c1 = root.querySelector("text.pk-c1");
-    if (!c1) return;
     const rec = k === null ? undefined : index.get(k);
-    c1.textContent = rec ? labelOf(rec.node, rec.parent !== null).text : centerText;
+    const el = k === null ? null : elFor(k);
+    const ring = el ? el.parentNode : null;
+    for (const p of root.querySelectorAll(".pk-wedge")) {
+      const on = p === el;
+      p.classList.toggle("pk-hov", on);
+      p.classList.toggle("pk-dull", !on && ring !== null && p.parentNode === ring);
+    }
+    if (rec) buzz(TICK_MS);   // one tick per wedge crossed — never per pointermove
+    const c1 = root.querySelector("text.pk-c1");
+    if (c1) c1.textContent = rec ? labelOf(rec.node, rec.parent !== null).text : centerText;
+    tintCenter(el);
+    paintLens(rec ?? null, el);
+  }
+
+  /** Hub takes the hovered wedge's own hue, so the pick reads even with the
+   *  lens clipped off the top of a short panel. @param {Element|null} el */
+  function tintCenter(el) {
+    const c = root.querySelector("circle.pk-center");
+    if (!(c instanceof SVGElement)) return;
+    const h = el instanceof SVGElement ? el.getAttribute("data-h") : null;
+    if (h === null) { c.classList.remove("pk-lit"); return; }
+    c.style.setProperty("--h", h);
+    c.classList.add("pk-lit");
+  }
+
+  /**
+   * The lens: a chip ABOVE the finger carrying the hovered node's emoji, its
+   * name and its own wedge colour. The finger covers the wedge it is on — this
+   * is the only way to see the current pick during a drag.
+   * @param {{node: PkNode, parent: PkGroup|null}|null} rec @param {Element|null} el
+   */
+  function paintLens(rec, el) {
+    if (!rec || !el) { hideLens(); return; }
+    if (!lens) {
+      lens = document.createElement("div");
+      lens.className = "pk-lens";
+      lens.setAttribute("aria-hidden", "true");
+      const g = document.createElement("span");
+      g.className = "pk-lens-glyph";
+      const t = document.createElement("span");
+      t.className = "pk-lens-name";
+      lens.append(g, t);
+    }
+    if (lens.parentNode !== root) root.appendChild(lens);
+    const lab = labelOf(rec.node, rec.parent !== null);
+    const glyph = lens.firstElementChild;
+    const name = lens.lastElementChild;
+    if (glyph instanceof HTMLElement) {
+      glyph.textContent = lab.emoji || lab.mono;
+      glyph.classList.toggle("pk-mono", !lab.emoji);
+    }
+    if (name instanceof HTMLElement) name.textContent = lab.text;
+    const h = el instanceof SVGElement ? el.getAttribute("data-h") : null;
+    lens.style.setProperty("--h", h ?? "0");
+    // measured HERE and cached: moveLens runs on every pointermove and a layout
+    // read per move is exactly the jank the whole picker exists to avoid
+    lensBox = { w: lens.offsetWidth || 120, h: lens.offsetHeight || 34 };
+    moveLens();
+  }
+
+  /** Follows the pointer every move, clamped inside the picker. Near the top
+   *  edge there is no room above the finger, so the chip flips below it rather
+   *  than sliding under the fingertip it is there to see past. */
+  function moveLens() {
+    if (!lens || !lensPt) return;
+    const w = root.clientWidth || 1;
+    const hgt = root.clientHeight || 1;
+    const lh = lensBox.h;
+    const half = lensBox.w / 2;
+    const x = Math.max(half + 2, Math.min(w - half - 2, lensPt.x));
+    const above = lensPt.y - LENS_LIFT;
+    const y = above - lh / 2 >= 2
+      ? above
+      : Math.min(hgt - lh / 2 - 2, lensPt.y + LENS_LIFT);
+    lens.style.setProperty("--lx", String(Math.round(x)) + "px");
+    lens.style.setProperty("--ly", String(Math.round(y)) + "px");
+  }
+
+  function hideLens() {
+    if (lens && lens.parentNode) lens.remove();
+  }
+
+  /** Pointer position in root-relative px, for the lens. @param {PointerEvent} e */
+  function trackPointer(e) {
+    const r = root.getBoundingClientRect();
+    lensPt = { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
   /** @param {number|null} id */
@@ -406,31 +563,43 @@ export function createPickerUI(opts) {
     capturedId = null;
   }
 
+  /**
+   * One hit, wherever it came from (finger or scripted demo). Groups open their
+   * fan; a top-level leaf reached while some OTHER group's fan is open closes
+   * that fan first — the user has visibly moved on from it, and leaving it up
+   * would keep the leaf under the finger dimmed and looking unpickable.
+   * @param {string} k
+   */
+  function wheelTo(k) {
+    const rec = index.get(k);
+    if (!rec) { setWheelHover(null); return; }
+    if (rec.node.kind === "group") { openGroup(rec.node); return; }
+    if (rec.parent === null && groupKey !== null) { closeFan(k); return; }
+    setWheelHover(k);
+  }
+
   /** @param {PointerEvent} e @param {Element} svg */
   function wheelDown(e, svg) {
     try { svg.setPointerCapture(e.pointerId); capturedId = e.pointerId; } catch { /* unsupported: drag still works via bubbling */ }
     dragging = true;
     downCenter = false;
+    trackPointer(e);
     const h = hitAt(e);
     if (!h) return;
     if ("center" in h) { downCenter = true; return; }
-    const rec = index.get(h.key);
-    if (!rec) return;
-    if (rec.node.kind === "group") openGroup(rec.node);
-    else setWheelHover(h.key);
+    const el = elFor(h.key);
+    if (el) press(el);
+    wheelTo(h.key);
   }
 
   /** @param {PointerEvent} e */
   function wheelMove(e) {
     if (!dragging) return;
+    trackPointer(e);
+    moveLens();
     const h = hitAt(e);
-    if (h && "key" in h) {
-      const rec = index.get(h.key);
-      if (rec && rec.node.kind === "group") { openGroup(rec.node); return; }
-      setWheelHover(rec ? h.key : null);
-      return;
-    }
-    setWheelHover(null);
+    if (h && "key" in h) { wheelTo(h.key); return; }
+    setWheelHover(null);   // the hub and the dead zone outside the rings
   }
 
   /** @param {PointerEvent} e */
@@ -438,6 +607,7 @@ export function createPickerUI(opts) {
     dragging = false;
     releaseCapture(e.pointerId);
     const h = hitAt(e);
+    hideLens();
     if (h && "center" in h) { if (downCenter) back(); return; }
     if (h && "key" in h) {
       const rec = index.get(h.key);
@@ -457,6 +627,7 @@ export function createPickerUI(opts) {
     if (e.clientX < EDGE_PX || e.clientX > window.innerWidth - EDGE_PX) return;
     const t = e.target;
     if (!(t instanceof Element)) return;
+    userActed();
     if (variant === "wheel") {
       if (t.closest(".pk-sr")) return;          // AT buttons activate through click(detail 0)
       const svg = root.querySelector("svg");
@@ -481,7 +652,7 @@ export function createPickerUI(opts) {
   /** @param {PointerEvent} e */
   function onPointerUp(e) {
     const stale = preArm.delete(e.pointerId);
-    if (destroyed || committed || !armed || stale) { dragging = false; return; }
+    if (destroyed || committed || !armed || stale) { dragging = false; hideLens(); return; }
     if (variant !== "wheel" || !dragging) { dragging = false; return; }
     wheelUp(e);
   }
@@ -492,6 +663,7 @@ export function createPickerUI(opts) {
     dragging = false;
     downCenter = false;
     releaseCapture(e.pointerId);
+    hideLens();
     if (variant === "wheel" && !committed && !destroyed) setWheelHover(null);
   }
 
@@ -510,6 +682,7 @@ export function createPickerUI(opts) {
     const el = t.closest("[data-key], [data-back]");
     if (!el) return;
     e.preventDefault();
+    userActed();
     activate(el);
   }
 
@@ -640,6 +813,75 @@ export function createPickerUI(opts) {
   window.addEventListener("resize", onResize, { signal: sig });
   window.addEventListener("orientationchange", onResize, { signal: sig });
 
+  /**
+   * Same handlers a finger runs, driven by the host's scripted preview. `spot`
+   * is measured, not computed: the caller's ghost has to land on the same pixel
+   * the engine will hit-test. Wheel targets report the mid-radius point of
+   * their wedge, everything else the centre of its box.
+   * @type {PickerDemo}
+   */
+  const demo = {
+    spot(k) {
+      const el = elFor(k);
+      if (!el) return null;
+      const rr = root.getBoundingClientRect();
+      if (variant !== "wheel") {
+        const b = el.getBoundingClientRect();
+        return { x: b.left + b.width / 2 - rr.left, y: b.top + b.height / 2 - rr.top };
+      }
+      const svg = root.querySelector("svg");
+      const g = geom;
+      if (!svg || !g) return null;
+      const rec = index.get(k);
+      const ring = rec && rec.parent !== null ? g.outer : g.inner;
+      const w = ring.find((it) => it.key === k);
+      if (!w) return null;
+      const b = svg.getBoundingClientRect();
+      const sc = Math.min(b.width, b.height) / WHEEL_BOX;
+      const rad = rec && rec.parent !== null ? (g.R1 + g.R2) / 2 : (g.R0 + g.R1) / 2;
+      return {
+        x: b.left + b.width / 2 + Math.cos(w.a) * rad * sc - rr.left,
+        y: b.top + b.height / 2 + Math.sin(w.a) * rad * sc - rr.top,
+      };
+    },
+    act(k) {
+      if (destroyed || committed) return;
+      scripted = true;
+      try {
+        const el = elFor(k);
+        if (!el) return;
+        if (variant === "wheel") { press(el); wheelTo(k); if (index.get(k)?.node.kind === "leaf") demoCommit(k, el); }
+        else activate(el);
+      } finally { scripted = false; }
+    },
+    hold(k) {
+      if (destroyed || committed) return;
+      scripted = true;
+      try {
+        const el = elFor(k);
+        if (el) press(el);
+        lensPt = demo.spot(k);
+        wheelTo(k);
+      } finally { scripted = false; }
+    },
+    slide(k) {
+      if (destroyed || committed) return;
+      scripted = true;
+      try { lensPt = demo.spot(k); moveLens(); wheelTo(k); } finally { scripted = false; }
+    },
+    release(k) {
+      if (destroyed || committed) return;
+      scripted = true;
+      try { hideLens(); const el = elFor(k); if (el) demoCommit(k, el); } finally { scripted = false; }
+    },
+  };
+
+  /** @param {string} k @param {Element} el */
+  function demoCommit(k, el) {
+    const rec = index.get(k);
+    if (rec && rec.node.kind === "leaf") commit(rec.node.catId, el);
+  }
+
   return {
     render: () => render(),
     arm() {
@@ -647,8 +889,13 @@ export function createPickerUI(opts) {
       armed = true;
       root.classList.add("pk-armed");
     },
-    key,
+    key(e) {
+      const used = key(e);
+      if (used) userActed();
+      return used;
+    },
     fits,
+    demo,
     setVariant(v) {
       if (destroyed || v === variant) return;
       variant = v;
@@ -657,6 +904,7 @@ export function createPickerUI(opts) {
       wheelHover = null;
       dragging = false;
       geom = null;
+      hideLens();
       render();
     },
     destroy() {
@@ -670,6 +918,8 @@ export function createPickerUI(opts) {
       // can be REOPENED inside that window (Escape then Enter): by then a newer
       // engine owns this root and blanking it would leave an empty picker.
       // Listeners and timers always go; the DOM only when it is still ours.
+      hideLens();
+      lens = null;
       if (root.dataset.pkOwner !== ownerId) return;
       delete root.dataset.pkOwner;
       root.replaceChildren();

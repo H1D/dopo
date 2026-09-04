@@ -487,6 +487,18 @@ describe("renderWheel", () => {
     expect(ds.length).toBe(tree.length + group.children.length);
     for (const d of ds) expect(d).toMatch(/^M-?[\d.]+,-?[\d.]+A/);
   });
+
+  test("recent is a dot, never a dashed wedge edge", () => {
+    const child = group.children[1];
+    const top = tree.find((n) => !isGroup(n));
+    const ids = [child, top].map((n) => (n && !isGroup(n) ? n.catId : 0));
+    const html = renderWheel(view(tree, { group, recentIds: ids }));
+    const svg = html.split('<div class="pk-sr">')[0] ?? "";
+    // the dashed stroke read as a rendering fault; the tiles' white dot does not
+    expect(svg).not.toContain("pk-recent");
+    expect(svg.match(/<circle class="pk-dot"/g)?.length).toBe(2);
+    expect(svg).toMatch(/<circle class="pk-dot" cx="-?[\d.]+" cy="-?[\d.]+" r="2.2"\/>/);
+  });
 });
 
 describe("hotkey assignment", () => {
@@ -579,6 +591,18 @@ describe("wheelHit", () => {
   test("the outer ring hits the open group's children", () => {
     for (const w of geom.outer) expect(wheelHit(geom, 77, w.a)).toEqual({ key: w.key });
     expect(wheelHit(geom, 100, geom.outer[0]?.a ?? 0)).toEqual({ key: geom.outer[0]?.key ?? "" });
+  });
+
+  test("the seam between two children is a hit, not a hole", () => {
+    // an even fan is centred ON the parent's angle: dragging straight outward
+    // from the group lands exactly between children, where a strict half-width
+    // test rejects BOTH and the most natural wheel gesture picks nothing
+    const parent = geom.inner.find((w) => w.key === group.key);
+    expect(geom.outer.length % 2).toBe(0);
+    const hit = wheelHit(geom, 77, parent?.a ?? 0);
+    expect(hit).not.toBeNull();
+    const keys = geom.outer.map((w) => w.key);
+    expect(keys).toContain((hit as { key: string }).key);
   });
 
   test("gaps and overshoot are misses, not the nearest wedge", () => {

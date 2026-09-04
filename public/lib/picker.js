@@ -593,7 +593,6 @@ export function renderWheel(view) {
     let cls = "pk-wedge";
     if (group) cls += group.key === node.key ? " pk-sel" : " pk-dim";
     if (marks.guess) cls += " pk-guess";
-    if (marks.recent) cls += " pk-recent";
     const clsHtml = esc(cls);
     const hotAttrHtml = code ? ` data-hot="${esc(code)}"` : "";
     const dHtml = arcPath(w.a - w.w / 2, w.a + w.w / 2, geom.R0, geom.R1);
@@ -604,6 +603,11 @@ export function renderWheel(view) {
     const gs = r1(lab.emoji ? fs : fs * 0.75);
     innerRingHtml += `<path class="${clsHtml}" data-key="${esc(node.key)}"${hotAttrHtml} data-h="${Number(hueOf(view.hues, node.key))}" d="${dHtml}"/>`;
     innerRingHtml += `<text class="${glyphClsHtml}" x="${Number(gx)}" y="${Number(gy)}" font-size="${Number(gs)}">${esc(lab.emoji || lab.mono)}</text>`;
+    if (marks.recent) {
+      const dx = r1(Math.cos(w.a) * (geom.R0 + 4));
+      const dy = r1(Math.sin(w.a) * (geom.R0 + 4));
+      innerRingHtml += `<circle class="pk-dot" cx="${Number(dx)}" cy="${Number(dy)}" r="2.2"/>`;
+    }
     if (marks.guess) {
       const sy = r1(gy - gs * 0.85);
       innerRingHtml += `<text class="pk-star" x="${Number(gx)}" y="${Number(sy)}" font-size="${Number(r1(gs * 0.6))}">★</text>`;
@@ -626,7 +630,6 @@ export function renderWheel(view) {
     const marks = marksOf(child, view);
     let cls = "pk-wedge";
     if (marks.guess) cls += " pk-guess";
-    if (marks.recent) cls += " pk-recent";
     const clsHtml = esc(cls);
     const hotAttrHtml = code ? ` data-hot="${esc(code)}"` : "";
     const dHtml = arcPath(w.a - w.w / 2, w.a + w.w / 2, geom.R1 + 2, geom.R2);
@@ -638,6 +641,11 @@ export function renderWheel(view) {
     const gs = r1(lab.emoji ? base : base * 0.7);
     outerRingHtml += `<path class="${clsHtml}" data-key="${esc(child.key)}"${hotAttrHtml} data-h="${Number(hueOf(view.hues, child.key))}" d="${dHtml}"/>`;
     outerRingHtml += `<text class="${glyphClsHtml}" x="${Number(gx)}" y="${Number(gy)}" font-size="${Number(gs)}">${esc(lab.emoji || lab.mono)}</text>`;
+    if (marks.recent) {
+      const dx = r1(Math.cos(w.a) * (geom.R1 + 6));
+      const dy = r1(Math.sin(w.a) * (geom.R1 + 6));
+      outerRingHtml += `<circle class="pk-dot" cx="${Number(dx)}" cy="${Number(dy)}" r="2.2"/>`;
+    }
     if (marks.guess) {
       const sy = r1(gy - gs * 0.85);
       outerRingHtml += `<text class="pk-star" x="${Number(gx)}" y="${Number(sy)}" font-size="${Number(r1(gs * 0.6))}">★</text>`;
@@ -706,14 +714,28 @@ export function wheelGeometry(nodes, group) {
 export function wheelHit(geom, rad, ang) {
   /** @param {number} d @returns {number} */
   const norm = (d) => Math.atan2(Math.sin(d), Math.cos(d));
+  /**
+   * Nearest covering wedge, not the first one found. The SEAM matters: a fan of
+   * an even number of children is centred on its parent's angle, so dragging
+   * straight outward from a group lands exactly on the boundary between two
+   * children — where |ang - a| is w/2 plus one float ulp for BOTH neighbours and
+   * a strict `<=` rejects the pair, leaving the most natural gesture on the
+   * wheel with nothing highlighted and nothing to commit. The slack closes it.
+   * @param {readonly Wedge[]} ring @returns {{key: string}|null}
+   */
+  const nearest = (ring) => {
+    /** @type {Wedge|null} */
+    let best = null;
+    let bestD = Infinity;
+    for (const it of ring) {
+      const d = Math.abs(norm(ang - it.a));
+      if (d < bestD && d <= it.w / 2 + 1e-6) { bestD = d; best = it; }
+    }
+    return best ? { key: best.key } : null;
+  };
   if (rad < geom.R0) return { center: true };
-  if (rad < geom.R1) {
-    for (const it of geom.inner) if (Math.abs(norm(ang - it.a)) <= it.w / 2) return { key: it.key };
-    return null;
-  }
-  if (rad <= geom.R2 + 4) {
-    for (const it of geom.outer) if (Math.abs(norm(ang - it.a)) <= it.w / 2) return { key: it.key };
-  }
+  if (rad < geom.R1) return nearest(geom.inner);
+  if (rad <= geom.R2 + 4) return nearest(geom.outer);
   return null;
 }
 
