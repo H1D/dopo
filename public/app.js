@@ -14,7 +14,7 @@ export {
 } from "./lib/card.js";
 
 import {
-  LMError, applyCategories, getMe, getState, getTransaction, KEEPALIVE_MAX_ITEMS, CUTOFF_PRESETS,
+  LMError, applyCategories, getMe, getState, getTransaction, isOpen, KEEPALIVE_MAX_ITEMS, CUTOFF_PRESETS,
 } from "./lib/lm.js";
 import { ORError, checkKey } from "./lib/classify.js";
 import { FREE_KEY, FREE_MODELS, FREE_CONCURRENCY } from "./lib/freekey.js";
@@ -190,7 +190,7 @@ function main() {
   /** @type {Map<string, Account>} */
   let acctByKey = new Map();
   /** @type {Txn[]} */
-  let allTxns = []; // last fetched uncategorized window (decorated)
+  let allTxns = []; // last fetched unreviewed window (decorated)
   /** @type {Txn[]} */
   let backlog = []; // eligible, not yet dealt (sorted confidence desc)
   /** @type {Txn[]} */
@@ -212,7 +212,7 @@ function main() {
   /** @type {number|null} */
   let lastFetchTs = null; // timestamp of the last successful state fetch THIS session
   /** @type {Set<number>} */
-  let snapshotIds = new Set(); // txn ids uncategorized in that snapshot
+  let snapshotIds = new Set(); // txn ids unreviewed in that snapshot
   let truncationNoted = false;
   /** @type {UndoState|null} */
   let undoState = null;
@@ -428,7 +428,7 @@ function main() {
   function confOf(t) {
     const s = t.suggestion;
     if (!s || s.suggested_category_id == null) return -1; // unsuggested last
-    return s.source === "rule" ? 1.001 : (s.confidence ?? 0);
+    return s.source === "rule" ? 1.001 : (s.confidence ?? 0); // "lm" carries 1: confirm-or-change sorts with the confident ones
   }
   /** @param {Txn} a @param {Txn} b */
   function byConfDesc(a, b) {
@@ -535,7 +535,7 @@ function main() {
     noteConnOutcome("lm", null);
     if (data.truncated && !truncationNoted) {
       truncationNoted = true;
-      note(`Sorting the oldest ${allTxns.length}${data.total ? ` of ${data.total}` : ""} uncategorized`);
+      note(`Sorting the oldest ${allTxns.length}${data.total ? ` of ${data.total}` : ""} unreviewed`);
     }
   }
 
@@ -619,7 +619,7 @@ function main() {
    *  rule's verdict would otherwise linger on cards it no longer matches. */
   async function reattachSuggestions() {
     for (const t of allTxns) if (t.suggestion?.source === "rule") t.suggestion = null;
-    await attachSuggestions(allTxns, rules); // never throws: cache misses degrade to null
+    await attachSuggestions(allTxns, rules, categories); // never throws: cache misses degrade to null
     reconcile();
     ensureClassified(); // cards left bare go back to the model
   }
@@ -850,7 +850,7 @@ function main() {
     }
   }
 
-  /** ONE membership recheck for the whole interactive flush (uncategorized window
+  /** ONE membership recheck for the whole interactive flush (unreviewed window
    *  via getState + per-id getTransaction fallback; absence alone NEVER discards a
    *  decision — same rules lib/lm.js applies). Kept SEPARATE from the PUT stage so
    *  poison bisect can re-PUT already-validated items with recheck:"none" instead
@@ -877,8 +877,8 @@ function main() {
         })));
       slice.forEach((it, j) => {
         const t = current[j];
-        if (t && t.category_id === null) sendable.push(it); // merely outside the paged window
-        else skipped.push(it.id); // categorized elsewhere, or gone
+        if (isOpen(t)) sendable.push(it); // merely outside the paged window
+        else skipped.push(it.id); // reviewed elsewhere, or gone
       });
     }
     return { sendable, skipped };
@@ -2018,7 +2018,7 @@ function main() {
       if (k) counts.set(k, (counts.get(k) || 0) + 1);
     }
     const rows = accounts
-      .filter((a) => counts.get(a.key)) // only accounts with uncategorized txns
+      .filter((a) => counts.get(a.key)) // only accounts with unreviewed txns
       .sort((a, b) => (counts.get(b.key) || 0) - (counts.get(a.key) || 0));
     /** @param {Account} a @returns {string} */
     const rowHtml = (a) => {
@@ -2032,7 +2032,7 @@ function main() {
       </label>`;
     };
     const rowsHtml = rows.map(rowHtml).join("");
-    els.acctBody.innerHTML = rows.length ? rowsHtml : '<div class="later-empty">No accounts with uncategorized transactions</div>';
+    els.acctBody.innerHTML = rows.length ? rowsHtml : '<div class="later-empty">No accounts with unreviewed transactions</div>';
     openSheet(els.acctSheet);
   }
   function closeAcctSheet() {
@@ -2907,7 +2907,7 @@ function main() {
     if (loadInFlight) msg = "Loading your transactions…";
     else if (loadState === "live" && !stateError) {
       const { startDate } = fetchWindow();
-      msg = `${backlog.length} uncategorized transaction${backlog.length === 1 ? "" : "s"} since ${fmtTxnDate(startDate)}`;
+      msg = `${backlog.length} unreviewed transaction${backlog.length === 1 ? "" : "s"} since ${fmtTxnDate(startDate)}`;
     } else if (connOffline()) msg = "You're offline — dopo loads your transactions when you reconnect.";
     else if (stateError) msg = "Couldn't load yet — dopo retries when you start.";
     else { msg = "Loading your transactions…"; void obLoad({}); }

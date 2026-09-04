@@ -42,7 +42,7 @@ const qi = (id: number, category_id: number, extra: Partial<QueueItem> = {}): Qu
   ...extra,
 });
 
-/** A txn as the uncategorized window serves it. */
+/** A txn as the unreviewed window serves it. */
 const winTxn = (id: number) => ({
   id,
   date: "2026-08-01",
@@ -66,12 +66,13 @@ beforeEach(() => {
 afterEach(() => mock?.restore());
 
 /**
- * Standard replay routes: the getState trio + the uncategorized window, per-id
+ * Standard replay routes: the getState trio + the unreviewed window, per-id
  * fallback GETs, and a PUT whose status can depend on the body (poison tests).
  */
 function routeReplay(opts: {
   window: number[];
-  perId?: Record<number, { category_id: number | null } | 404>;
+  /** per-id GET answers; status defaults to "reviewed" once a category is set, "unreviewed" otherwise */
+  perId?: Record<number, { category_id: number | null; status?: "reviewed" | "unreviewed" } | 404>;
   putStatus?: (body: { transactions: { id: number }[] }) => number;
 }) {
   mock = new MockFetch()
@@ -89,7 +90,8 @@ function routeReplay(opts: {
       if (!m) return null;
       const spec = opts.perId?.[Number(m[1])];
       if (spec === undefined || spec === 404) return json({ error: "not found" }, 404);
-      return json({ id: Number(m[1]), category_id: spec.category_id, is_pending: false });
+      const status = spec.status ?? (spec.category_id === null ? "unreviewed" : "reviewed");
+      return json({ id: Number(m[1]), category_id: spec.category_id, status, is_pending: false });
     })
     .route((url, init) => {
       if (init?.method === "PUT" && url.endsWith("/v2/transactions")) {
@@ -120,9 +122,9 @@ describe("replayQueue — contract", () => {
     queueSave([
       qi(1, 101), // in the window -> applied (flushable:false: boot replay marks it)
       qi(2, 102, { make_rule: { pattern: "albert heijn", match_type: "contains" } }), // applied + rule
-      qi(3, 101), // categorized elsewhere, never sent from here -> skippedUnsent (announce)
+      qi(3, 101), // reviewed elsewhere, never sent from here -> skippedUnsent (announce)
       qi(4, 101, { sent: true }), // 404 upstream, already sent once -> skippedSent (silent)
-      qi(5, 103), // outside the window but still uncategorized -> applied
+      qi(5, 103), // outside the window but still unreviewed -> applied
     ]);
     routeReplay({ window: [1, 2], perId: { 3: { category_id: 200 }, 4: 404, 5: { category_id: null } } });
 

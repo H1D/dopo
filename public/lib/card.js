@@ -162,9 +162,11 @@ export function cardHTML(txn, { category = null, account = null, confidentAt = C
   // esc(...)/Number(...) calls, and literals inside HTML template lines.
   const badgeHtml = s?.source === "rule"
     ? '<span class="card-badge rule-badge">rule match</span>'
-    : s?.source === "web"
-      ? '<span class="card-badge web-badge">🌐 web-checked</span>'
-      : unsure ? '<span class="card-badge unsure-badge">unsure</span>' : "";
+    : s?.source === "lm"
+      ? '<span class="card-badge lm-badge">already categorized</span>'
+      : s?.source === "web"
+        ? '<span class="card-badge web-badge">🌐 web-checked</span>'
+        : unsure ? '<span class="card-badge unsure-badge">unsure</span>' : "";
   const heroHtml = esc(catBits?.emoji || (cat ? "🧾" : "❓"));
   const chipHtml = cat && catBits ? esc(catBits.text) : "tap to pick a category";
   const groupHtml = cat?.group ? `<div class="cat-group">${esc(cat.group)}</div>` : "";

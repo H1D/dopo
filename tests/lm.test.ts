@@ -63,6 +63,34 @@ describe("getState", () => {
     expect(state.accounts.find((a) => a.key === "p11")?.name).toBe("ABN AMRO Betaalrekening");
   });
 
+  test("membership = unreviewed + not pending: an LM-categorized row stays in, reviewed / pending rows drop", async () => {
+    const row = (id: number, extra: Record<string, unknown>) => ({
+      id, date: "2026-08-24", amount: "440.89", currency: "eur", payee: "Ayvens", category_id: null, notes: null,
+      status: "unreviewed", is_pending: false, plaid_account_id: 11, manual_account_id: null, ...extra,
+    });
+    mock = new MockFetch()
+      .route((url) => (url.includes("/v2/categories") ? json(categoriesFx) : null))
+      .route((url) => (url.includes("/v2/plaid_accounts") ? json({ plaid_accounts: accountsFx.plaid_accounts }) : null))
+      .route((url) => (url.includes("/v2/manual_accounts") ? json({ manual_accounts: accountsFx.manual_accounts }) : null))
+      .route((url) => (url.includes("/v2/transactions?")
+        ? json({
+          transactions: [
+            row(1, { category_id: 101 }), // categorized by an LM rule, not yet reviewed -> in
+            row(2, { category_id: 101, status: "reviewed" }), // reviewed -> out
+            row(3, { status: "reviewed" }), // reviewed without a category (odd, but LM allows it) -> out
+            row(4, { is_pending: true }), // pending -> out
+            row(5, {}), // plain unreviewed -> in
+          ],
+          has_more: false,
+        })
+        : null))
+      .install();
+    const state = await getState("tok-1");
+    expect(state.transactions.map((t) => t.id)).toEqual([1, 5]);
+    expect(state.transactions[0]!.category_id).toBe(101); // the existing category rides along
+    expect(state.total).toBe(2);
+  });
+
   test("hard 5-page ceiling: stops fetching, reports truncated + API total", async () => {
     routeState(Array(10).fill(endlessPageFx) as never);
     const state = await getState("tok-1");
@@ -99,23 +127,23 @@ describe("applyCategories — membership recheck with per-id fallback", () => {
     has_more: false,
   };
 
-  test("miss -> per-id GET: 404 skipped, still-uncategorized sent, categorized skipped", async () => {
+  test("miss -> per-id GET: 404 skipped, still-unreviewed sent, reviewed skipped", async () => {
     mock = new MockFetch()
       .route((url, init) => {
         if (url.includes("/v2/transactions?") && (!init?.method || init.method === "GET")) return json(windowPage);
         return null;
       })
       .route((url) => (url.endsWith("/v2/transactions/2") ? json({ error: "not found" }, 404) : null))
-      .route((url) => (url.endsWith("/v2/transactions/3") ? json({ id: 3, category_id: null, is_pending: false }) : null))
-      .route((url) => (url.endsWith("/v2/transactions/4") ? json({ id: 4, category_id: 200, is_pending: false }) : null))
+      .route((url) => (url.endsWith("/v2/transactions/3") ? json({ id: 3, category_id: 200, status: "unreviewed", is_pending: false }) : null))
+      .route((url) => (url.endsWith("/v2/transactions/4") ? json({ id: 4, category_id: 200, status: "reviewed", is_pending: false }) : null))
       .route((url, init) => (init?.method === "PUT" && url.endsWith("/v2/transactions") ? json({}) : null))
       .install();
 
     const res = await applyCategories("tok", [
       { id: 1, category_id: 101 }, // in the window -> sent without per-id fetch
       { id: 2, category_id: 101 }, // 404 -> skipped (absence alone never bricks replay)
-      { id: 3, category_id: 102 }, // outside window but still uncategorized -> sent
-      { id: 4, category_id: 101 }, // categorized elsewhere since -> skipped
+      { id: 3, category_id: 102 }, // outside window, LM-categorized but still unreviewed -> sent
+      { id: 4, category_id: 101 }, // reviewed elsewhere since -> skipped
     ]);
 
     expect(res.applied.sort()).toEqual([1, 3]);

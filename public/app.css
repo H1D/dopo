@@ -382,8 +382,10 @@ header.top {
 .card-badge.unsure-badge { background: var(--warn-bg); color: var(--warn); }
 .card-badge.rule-badge { background: var(--accent-bg); color: var(--accent); }
 .card-badge.web-badge { background: #eaf2ff; color: #1d4ed8; }
+.card-badge.lm-badge { background: #ecfdf3; color: #067647; }
 @media (prefers-color-scheme: dark) {
   .card-badge.web-badge { background: #1d2a45; color: #8ab4ff; }
+  .card-badge.lm-badge { background: #12301f; color: #6ee7a0; }
 }
 
 .hero {

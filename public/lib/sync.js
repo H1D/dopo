@@ -11,7 +11,7 @@
  * RELEASED across all network I/O in between.
  */
 
-import { LMError, applyCategories, getState, getTransaction } from "./lm.js";
+import { LMError, applyCategories, getState, getTransaction, isOpen } from "./lm.js";
 import { fetchWindow, queueMutate, ruleAdd, snapshotPrune } from "./store.js";
 
 /** @typedef {import("./store.js").QueueItem} QueueItem */
@@ -121,12 +121,12 @@ export async function replayQueue(token, opts = {}) {
 }
 
 /**
- * ONE membership recheck for the whole replay: current uncategorized window
+ * ONE membership recheck for the whole replay: current unreviewed window
  * (getState — categories/accounts ride along; the price of reusing lm.js as-is),
  * then per-id fallback for misses in small parallel batches:
  *   404                 → skipped (deleted, or token re-pointed at another budget)
- *   still uncategorized → safe    (merely outside the paged window / date range)
- *   categorized         → skipped (someone or something got there first)
+ *   still unreviewed    → safe    (merely outside the paged window / date range)
+ *   reviewed            → skipped (someone or something got there first)
  * @param {string} token
  * @param {QueueItem[]} items
  * @returns {Promise<{safe: QueueItem[], skipped: QueueItem[]}>}
@@ -153,7 +153,7 @@ async function recheckMembership(token, items) {
     );
     batch.forEach((it, j) => {
       const t = current[j];
-      if (t && t.category_id === null) safe.push(it);
+      if (isOpen(t)) safe.push(it);
       else skipped.push(it);
     });
   }
