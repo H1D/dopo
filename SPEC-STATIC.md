@@ -154,15 +154,51 @@ source of truth for transaction data; the device is the source of truth for pend
 
 ## Settings / onboarding
 
-- Settings: two password fields (LM required, OR optional — the shared free tier fills in), live validation per field, budget name
-  display, **"Forget tokens on this device"** button (clears tokens only), web-check session counter,
-  **deck cutoff** chips, **local rules** list.
+- Settings is a short menu of native `<details>` groups (`.settings-group`): **Lunch Money account**
+  (LM token, budget name, "Forget tokens on this device" — clears tokens only), **AI suggestions**
+  (OR key — the shared free tier fills in —, web-check session counter, the per-bucket "Ask AI
+  automatically about" checkboxes), **What to sort** (cutoff chips, the per-bucket "Include"
+  checkboxes, "Skip tagged" chips), **Category picker**, **Local rules**, **Badge & sound**. Both
+  token fields are live-validated. Open/closed state is the user's within a session; app.js only
+  forces a group open when it has something to show there (`openSettingsSheet(dead, {group})`: a
+  dead LM token → account, a dead OR key / the AI hint bar / the upgrade banner → AI suggestions,
+  the picker preview handing back → picker; no LM token at all → account).
 - **Deck cutoff** (`dopo.cutoff.v1`, presets `1w`/`1m`/`3m`/`ytd`, default `ytd` = the pre-cutoff
-  behaviour): `store.fetchWindow()` is the single source of the LM date window, used by the deck
-  fetch AND by every membership recheck so the two never page different ranges. Unknown ids fall
-  back to the default rather than fetching an empty or unbounded range. Changing it is applied on
-  sheet close (like the accounts filter) as a full refetch + redeal, not a `reconcile()` — the top
-  card may no longer be in range.
+  behaviour): `store.fetchWindow()` is the single source of the LM date window **and scope**, used by
+  the deck fetch AND by every membership recheck so the two never page different ranges under
+  different membership tests. Unknown ids fall back to the default rather than fetching an empty or
+  unbounded range. Changing it is applied on sheet close (like the accounts filter) as a full refetch
+  + redeal (`applyDeckChange`), not a `reconcile()` — the top card may no longer be in range.
+- **Deck scope** (`dopo.scope.v1`; `store.scopeLoad/scopeSave`, per-field validated so a partial or
+  older record degrades field by field): every transaction is in exactly one **bucket**
+  (`lm.bucketOf`: `reviewed` when LM marked it reviewed, else `uncategorized` without a category,
+  else `unreviewed` = categorized by LM's own rules / the bank feed but not reviewed).
+  - `include` (default uncategorized ✓, unreviewed ✓, reviewed ✗ = what dopo always fetched) says
+    which buckets the deck holds; `skipTags` (`{id, name}[]`, names kept so Settings renders
+    offline) keeps any row carrying one of them out regardless. `lm.inScope(t, scope)` is the ONE
+    membership test — the paged fetch, `applyCategories`' per-id fallback and `sync.js`'s replay
+    recheck all use it, with pending rows always out. `isOpen` survives as `inScope` under the
+    default scope. Reviewed rows in scope are sent through the same PUT (`status: "reviewed"`,
+    re-filing them); the "someone got there first" skip is by construction unavailable for them.
+  - `ai` (same defaults) says which buckets pass 1 runs on **unasked** (`data.wantsAi`). Every
+    other card that the model could still add to (`data.askable`: bare, or holding only the
+    LM category, and no verdict yet — `aiChecked`) shows an **"Ask AI"** button instead
+    (`card.js` `askAi: "idle"|"busy"|null`), which runs pass 1 for that one row through the same
+    `absorbPass1Slice`; no button on snapshot decks or without any OR credentials (a tap without
+    a key opens the AI group of Settings).
+  - **Second opinions** (`data.mergeAi`, pure): a fresh or cached model verdict on a row whose LM
+    category is a trusted leaf only takes the card when it is CONFIDENT (`CONFIDENT_AT`) and
+    DISAGREES — then the badge reads "AI disagrees" and a "Lunch Money has: …" footnote names the
+    held category. Agreement or an unsure verdict keeps the `lm` suggestion (confidence 1, the
+    one-swipe confirm) with the verdict named in the reasoning. Rules stay on top; a web verdict is
+    never replaced by pass 1. `aiChecked` is set whenever a verdict exists for the row, so a
+    verdict that lost to the held category is not re-asked.
+  - Include / skip-tag changes are applied on sheet close like the cutoff (`deckDirty`); AI-flag
+    changes just re-run `ensureClassified`. The wizard's tune step ("What to sort?") holds the
+    same cutoff chips, include checkboxes and skip-tag chips and refetches right away; its count
+    line reads "N transactions to sort since <date>". Tags come from `GET /v2/tags` (`lm.getTags`,
+    archived ones dropped), fetched on Settings open / tune-step entry; a saved skip tag the fetch
+    no longer returns stays as a chip so it can be switched off.
 - **Local rules**: pattern → category, delete only (creation stays on the undo toast). Deleting one
   clears rule-sourced suggestions and re-attaches from the remaining rules + caches, so a deleted
   rule leaves no ghost verdict on a card.
@@ -176,6 +212,22 @@ source of truth for transaction data; the device is the source of truth for pend
   (detected by an already-stored LM token), then persist it so the one-time "new pickers" hint
   fires once. `list` is also the automatic fallback for trees too large for a non-scrolling layout.
   Settings has the same five chips plus a "Try" button.
+  - **Wheel geometry**: at rest the inner ring is the whole disc (`R0..R_FULL` = 20..98 viewBox
+    units); opening a group puts `pk-open` on the `<svg>` and CSS scales `g.pk-inner` by
+    `innerScale` (56/98, 120 ms, none under reduced motion) so the fan takes 58..98. The inner
+    paths are never rebuilt (pointer capture lives on the `<svg>`); `wheelGeometry()` is the one
+    source for the hit band (`R1` = 98 at rest, 56 open), the demo finger's spot and the CSS factor.
+    Because the hit geometry flips instantly while the ring shrinks, a group opened by the current
+    gesture starts a **12 px dead zone** (`OPEN_SLOP`): inside it nothing is hovered and a
+    pointerup leaves the fan open (tap-open); outside it normal drag-and-lift resumes. `wheelHit()`
+    takes the hovered key for **angular hysteresis** (0.06 rad past a wedge's edge) so a finger on
+    the seam of an even fan does not flip between two children — and pointerup hits with the same
+    `keep`, so the commit is always what the lens shows.
+  - **Lens**: the chip above the finger is a `popover="hint"` where the Popover API exists (top
+    layer — above the sheet body's `overflow:hidden` and every stacking context — positioned fixed
+    from viewport px; lift = 56 px + half its height). A hint light-dismisses on any outside
+    pointerup or Escape, so `moveLens()` re-arms it every move (`manual` would be the stricter type;
+    `hint` was the explicit ask). Without the API it stays the absolute chip inside the picker root.
 - **Category hues** (`dopo.hues.v1`): the persisted per-category hue map, keys `c:<id>` for leaves
   and `g:<group name>` for groups, values integers 0..359. Hues are assigned once (largest angular
   gap among already-assigned siblings) and then **never change**, which is the whole point — colours
@@ -187,8 +239,9 @@ source of truth for transaction data; the device is the source of truth for pend
 - **Onboarding wizard** (`#onboard`, a `<dialog>` in the top layer; replaces the old onboarding
   card): 6 steps — welcome (what dopo does, the privacy line, an offline note) → lm (paste the LM
   token, live-validated) → or (a real radio group, `own` first: `free` when a shared key is
-  configured, else `none`; `own` reveals a key field and a 3-step how-to) → tune ("How far back?":
-  cutoff chips always expanded as "Include transactions for" plus the live uncategorized count) →
+  configured, else `none`; `own` reveals a key field and a 3-step how-to) → tune ("What to sort?":
+  cutoff chips always expanded as "Include transactions for", the per-bucket include checkboxes,
+  the skip-tag chips, plus the live in-scope count) →
   picker (choose the category picker: five chips from `PICKER_META`, a one-line blurb, and a
   "Try it" button that swaps the step body for a live in-place demo — no nested dialog; the choice
   persists on selection and `canAdvance` always permits Continue) → done (gesture legend and the

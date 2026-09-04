@@ -46,6 +46,13 @@ export class LMError extends Error {
  * @property {boolean} is_pending
  * @property {number|null} plaid_account_id
  * @property {number|null} manual_account_id
+ * @property {number[]} [tag_ids]
+ */
+
+/**
+ * @typedef {object} LMTag
+ * @property {number} id
+ * @property {string} name
  */
 
 /**
@@ -80,7 +87,7 @@ export class LMError extends Error {
  * @property {LeafCategory[]} categories  flat assignable leaves with group attached —
  *   the same shape the old /api/state served, which the UI renders directly
  * @property {LMAccount[]} accounts
- * @property {LMTransaction[]} transactions  unreviewed, non-pending (see isOpen)
+ * @property {LMTransaction[]} transactions  in scope, non-pending (see inScope)
  * @property {boolean} truncated  true when the 5-page ceiling was hit with more pages behind it
  * @property {number|null} total  total unreviewed count when known (API-reported when
  *   truncated; equals transactions.length otherwise; null when the API gives no total)
@@ -223,27 +230,79 @@ export function defaultRange() {
 }
 
 /**
- * Deck membership: a transaction is "open" (still dopo's to sort) until Lunch
- * Money marks it reviewed. Already-categorized rows (LM rules, bank feeds) stay
- * in — the existing category rides along as a confirm-or-change suggestion.
- * Pending rows are skipped: their payee/amount can still change.
+ * Every transaction falls in exactly one bucket. Reviewed wins over the category
+ * test, so a reviewed-but-uncategorized row (Lunch Money allows it) is "reviewed".
+ * Ids are persisted (lib/store.js `dopo.scope.v1`) — add, don't rename.
+ * @typedef {"uncategorized"|"unreviewed"|"reviewed"} Bucket
+ *   uncategorized: not reviewed, no category
+ *   unreviewed:    not reviewed, but already carries a category (LM rules, the bank feed)
+ *   reviewed:      Lunch Money marked it reviewed
+ */
+/** @type {readonly Bucket[]} */
+export const BUCKETS = /** @type {const} */ (["uncategorized", "unreviewed", "reviewed"]);
+
+/**
+ * Which buckets the deck holds, and which tags keep a row out of it regardless.
+ * @typedef {object} Scope
+ * @property {Record<Bucket, boolean>} include
+ * @property {number[]} skipTagIds
+ */
+
+/** What dopo has always fetched: everything not yet reviewed. */
+export const DEFAULT_SCOPE = /** @type {Scope} */ ({
+  include: { uncategorized: true, unreviewed: true, reviewed: false },
+  skipTagIds: [],
+});
+
+/**
+ * @param {Partial<LMTransaction>} t
+ * @returns {Bucket}
+ */
+export function bucketOf(t) {
+  if (t.status === "reviewed") return "reviewed";
+  return t.category_id == null ? "uncategorized" : "unreviewed";
+}
+
+/**
+ * Deck membership: a row is dopo's to sort when its bucket is included and none
+ * of its tags is a skip tag. Pending rows are always out: their payee/amount can
+ * still change. Already-categorized rows that are in ride along with the existing
+ * category as a confirm-or-change suggestion.
+ * @param {Partial<LMTransaction>|null|undefined} t
+ * @param {Scope} [scope]
+ * @returns {boolean}
+ */
+export function inScope(t, scope = DEFAULT_SCOPE) {
+  if (!t || t.is_pending) return false;
+  if (!scope.include[bucketOf(t)]) return false;
+  if (scope.skipTagIds.length && Array.isArray(t.tag_ids)) {
+    const skip = new Set(scope.skipTagIds);
+    if (t.tag_ids.some((id) => skip.has(id))) return false;
+  }
+  return true;
+}
+
+/**
+ * The pre-scope membership test (unreviewed + not pending) — `inScope` with the
+ * default scope. Kept for callers that have no scope to hand.
  * @param {Partial<LMTransaction>|null|undefined} t
  * @returns {boolean}
  */
 export function isOpen(t) {
-  return !!t && t.status !== "reviewed" && !t.is_pending;
+  return inScope(t);
 }
 
 /**
- * One paged sweep of unreviewed, non-pending transactions in the range.
+ * One paged sweep of in-scope, non-pending transactions in the range.
  * Pages until `has_more` is false, HARD CEILING `maxPages`.
  * @param {string} token
  * @param {string} start
  * @param {string} end
  * @param {number} maxPages
+ * @param {Scope} scope
  * @returns {Promise<{transactions: LMTransaction[], truncated: boolean, total: number|null}>}
  */
-async function fetchUnreviewed(token, start, end, maxPages) {
+async function fetchInScope(token, start, end, maxPages, scope) {
   /** @type {LMTransaction[]} */
   const out = [];
   let offset = 0;
@@ -261,7 +320,7 @@ async function fetchUnreviewed(token, start, end, maxPages) {
       `/transactions?start_date=${start}&end_date=${end}&limit=${PAGE_LIMIT}&offset=${offset}`,
     );
     const txns = Array.isArray(page.transactions) ? page.transactions : [];
-    out.push(...txns.filter(isOpen));
+    out.push(...txns.filter((t) => inScope(t, scope)));
     if (typeof page.total === "number") apiTotal = page.total;
     if (!page.has_more) break;
     offset += txns.length;
@@ -300,11 +359,27 @@ export async function getAccounts(token) {
 }
 
 /**
- * Categories + accounts + unreviewed transactions in one call.
+ * GET /v2/tags — id + name only; the deck's "skip by tag" filter matches on ids.
+ * @param {string} token
+ * @returns {Promise<LMTag[]>}
+ */
+export async function getTags(token) {
+  const res = await lm(token, "/tags");
+  const raw = Array.isArray(res?.tags) ? res.tags : [];
+  /** @type {LMTag[]} */
+  const out = [];
+  for (const t of raw) {
+    if (t && typeof t.id === "number" && typeof t.name === "string" && t.archived !== true) out.push({ id: t.id, name: t.name });
+  }
+  return out;
+}
+
+/**
+ * Categories + accounts + in-scope transactions in one call.
  * Transaction paging stops at the 5-page hard ceiling; `truncated`/`total` let the
  * UI say "oldest N of M" instead of silently pretending the window is complete.
  * @param {string} token
- * @param {{startDate?: string, endDate?: string, maxPages?: number}} [opts]
+ * @param {{startDate?: string, endDate?: string, maxPages?: number, scope?: Scope}} [opts]
  * @returns {Promise<LMState>}
  */
 export async function getState(token, opts = {}) {
@@ -315,7 +390,7 @@ export async function getState(token, opts = {}) {
   const [cats, accounts, txns] = await Promise.all([
     lm(token, "/categories"),
     getAccounts(token),
-    fetchUnreviewed(token, start, end, maxPages),
+    fetchInScope(token, start, end, maxPages, opts.scope ?? DEFAULT_SCOPE),
   ]);
   return {
     categories: leafCategories(Array.isArray(cats.categories) ? cats.categories : []),
@@ -353,11 +428,12 @@ function chunk(arr, size) {
  * Bulk-set categories and mark reviewed.
  *
  * recheck "membership" (default — the only safe mode for normal flushes):
- *   fetches the current unreviewed window ONCE and membership-tests each update.
+ *   fetches the current in-scope window ONCE and membership-tests each update.
  *   On a miss it falls back to per-id GET /v2/transactions/{id}:
  *     404                 -> skipped (deleted, or token re-pointed at another budget)
- *     still unreviewed    -> sent   (merely outside the paged window / date range)
- *     reviewed            -> skipped (someone or something got there first)
+ *     still in scope      -> sent   (merely outside the paged window / date range)
+ *     out of scope        -> skipped (reviewed elsewhere — or, with reviewed rows
+ *                            excluded, someone or something got there first)
  *   Absence from the window alone NEVER discards a decision.
  *
  * recheck "none" (hidden-flush only): no network recheck; the caller must have
@@ -368,11 +444,12 @@ function chunk(arr, size) {
  *
  * @param {string} token
  * @param {CategoryUpdate[]} updates
- * @param {{recheck?: "membership"|"none", keepalive?: boolean, startDate?: string, endDate?: string, maxPages?: number}} [opts]
+ * @param {{recheck?: "membership"|"none", keepalive?: boolean, startDate?: string, endDate?: string, maxPages?: number, scope?: Scope}} [opts]
  * @returns {Promise<{applied: number[], skipped: number[]}>}
  */
 export async function applyCategories(token, updates, opts = {}) {
   const recheck = opts.recheck ?? "membership";
+  const scope = opts.scope ?? DEFAULT_SCOPE;
   /** @type {number[]} */
   const applied = [];
   /** @type {number[]} */
@@ -382,11 +459,12 @@ export async function applyCategories(token, updates, opts = {}) {
 
   if (recheck === "membership") {
     const range = defaultRange();
-    const window = await fetchUnreviewed(
+    const window = await fetchInScope(
       token,
       opts.startDate ?? range.start,
       opts.endDate ?? range.end,
       opts.maxPages ?? MAX_PAGES,
+      scope,
     );
     const open = new Set(window.transactions.map((t) => t.id));
     /** @type {CategoryUpdate[]} */
@@ -407,7 +485,7 @@ export async function applyCategories(token, updates, opts = {}) {
       );
       batch.forEach((u, i) => {
         const t = current[i];
-        if (isOpen(t)) safe.push(u);
+        if (inScope(t, scope)) safe.push(u);
         else skipped.push(u.id);
       });
     }

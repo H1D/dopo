@@ -5,14 +5,20 @@ import accountsFx from "./fixtures/lm/accounts.json";
 import pagesFx from "./fixtures/lm/transactions-2pages.json";
 import endlessPageFx from "./fixtures/lm/transactions-endless-page.json";
 import {
+  BUCKETS,
   CUTOFF_PRESETS,
   DEFAULT_CUTOFF,
+  DEFAULT_SCOPE,
   LMError,
   applyCategories,
+  bucketOf,
   cutoffRange,
   defaultRange,
   getMe,
   getState,
+  getTags,
+  inScope,
+  isOpen,
 } from "../public/lib/lm.js";
 
 let mock: MockFetch;
@@ -107,6 +113,116 @@ describe("getState", () => {
     expect(err).toBeInstanceOf(LMError);
     expect(err.status).toBe(401);
     expect(err.tokenInvalid).toBe(true);
+  });
+});
+
+describe("bucketOf / inScope — deck membership", () => {
+  const row = (extra: Record<string, unknown>) => ({ id: 1, status: "unreviewed", category_id: null, is_pending: false, ...extra });
+
+  test("every row lands in exactly one of the three buckets; reviewed wins over the category test", () => {
+    expect(BUCKETS).toEqual(["uncategorized", "unreviewed", "reviewed"]);
+    expect(bucketOf(row({}))).toBe("uncategorized");
+    expect(bucketOf(row({ category_id: 101 }))).toBe("unreviewed");
+    expect(bucketOf(row({ category_id: 101, status: "reviewed" }))).toBe("reviewed");
+    expect(bucketOf(row({ status: "reviewed" }))).toBe("reviewed"); // reviewed without a category (LM allows it)
+    expect(bucketOf(row({ status: "delete_pending" }))).toBe("uncategorized"); // not reviewed -> by category
+  });
+
+  test("the default scope is what dopo always fetched: not reviewed, not pending", () => {
+    expect(inScope(row({}))).toBe(true);
+    expect(inScope(row({ category_id: 101 }))).toBe(true);
+    expect(inScope(row({ status: "reviewed", category_id: 101 }))).toBe(false);
+    expect(inScope(row({ is_pending: true }))).toBe(false);
+    expect(inScope(null)).toBe(false);
+    expect(inScope(undefined)).toBe(false);
+    expect(isOpen(row({ category_id: 101 }))).toBe(true); // the legacy name = default scope
+    expect(isOpen(row({ status: "reviewed" }))).toBe(false);
+  });
+
+  test("include flags switch buckets on and off; pending stays out regardless", () => {
+    const onlyReviewed = { include: { uncategorized: false, unreviewed: false, reviewed: true }, skipTagIds: [] };
+    expect(inScope(row({}), onlyReviewed)).toBe(false);
+    expect(inScope(row({ category_id: 101 }), onlyReviewed)).toBe(false);
+    expect(inScope(row({ category_id: 101, status: "reviewed" }), onlyReviewed)).toBe(true);
+    expect(inScope(row({ category_id: 101, status: "reviewed", is_pending: true }), onlyReviewed)).toBe(false);
+  });
+
+  test("a skip tag keeps a row out whatever its bucket; rows without tag_ids are unaffected", () => {
+    const scope = { ...DEFAULT_SCOPE, skipTagIds: [7] };
+    expect(inScope(row({ tag_ids: [7] }), scope)).toBe(false);
+    expect(inScope(row({ tag_ids: [3, 7] }), scope)).toBe(false);
+    expect(inScope(row({ tag_ids: [3] }), scope)).toBe(true);
+    expect(inScope(row({ tag_ids: [] }), scope)).toBe(true);
+    expect(inScope(row({}), scope)).toBe(true);
+    expect(inScope(row({ tag_ids: [7] }))).toBe(true); // no skip tags configured
+  });
+
+  test("getState pages under the given scope: reviewed rows in, tagged rows out", async () => {
+    const row2 = (id: number, extra: Record<string, unknown>) => ({
+      id, date: "2026-08-24", amount: "1.00", currency: "eur", payee: "x", category_id: null, notes: null,
+      status: "unreviewed", is_pending: false, plaid_account_id: 11, manual_account_id: null, ...extra,
+    });
+    mock = new MockFetch()
+      .route((url) => (url.includes("/v2/categories") ? json(categoriesFx) : null))
+      .route((url) => (url.includes("/v2/plaid_accounts") ? json({ plaid_accounts: accountsFx.plaid_accounts }) : null))
+      .route((url) => (url.includes("/v2/manual_accounts") ? json({ manual_accounts: accountsFx.manual_accounts }) : null))
+      .route((url) => (url.includes("/v2/transactions?")
+        ? json({
+          transactions: [
+            row2(1, {}), // uncategorized -> out under this scope
+            row2(2, { category_id: 101 }), // categorized, unreviewed -> in
+            row2(3, { category_id: 101, status: "reviewed" }), // reviewed -> in
+            row2(4, { category_id: 101, status: "reviewed", tag_ids: [7] }), // reviewed but skip-tagged -> out
+            row2(5, { category_id: 101, tag_ids: [8] }), // other tag -> in
+          ],
+          has_more: false,
+        })
+        : null))
+      .install();
+    const state = await getState("tok-1", {
+      scope: { include: { uncategorized: false, unreviewed: true, reviewed: true }, skipTagIds: [7] },
+    });
+    expect(state.transactions.map((t) => t.id)).toEqual([2, 3, 5]);
+    expect(state.total).toBe(3);
+  });
+
+  test("applyCategories rechecks under the same scope: a reviewed row is SENT when reviewed rows are in scope", async () => {
+    mock = new MockFetch()
+      .route((url, init) => (url.includes("/v2/transactions?") && (!init?.method || init.method === "GET")
+        ? json({ transactions: [], has_more: false }) : null))
+      .route((url) => (url.endsWith("/v2/transactions/4") ? json({ id: 4, category_id: 200, status: "reviewed", is_pending: false }) : null))
+      .route((url) => (url.endsWith("/v2/transactions/5") ? json({ id: 5, category_id: 200, status: "reviewed", is_pending: false, tag_ids: [7] }) : null))
+      .route((url, init) => (init?.method === "PUT" && url.endsWith("/v2/transactions") ? json({}) : null))
+      .install();
+    const res = await applyCategories("tok", [
+      { id: 4, category_id: 101 }, // reviewed, and reviewed rows are in scope -> sent
+      { id: 5, category_id: 101 }, // reviewed but carries a skip tag -> skipped
+    ], { scope: { include: { uncategorized: true, unreviewed: true, reviewed: true }, skipTagIds: [7] } });
+    expect(res.applied).toEqual([4]);
+    expect(res.skipped).toEqual([5]);
+  });
+});
+
+describe("getTags", () => {
+  test("id + name only, archived tags dropped, garbage ignored", async () => {
+    mock = new MockFetch()
+      .route((url) => (url.endsWith("/v2/tags")
+        ? json({ tags: [
+          { id: 1, name: "ignore", description: "", text_color: "333", background_color: "FFF", archived: false },
+          { id: 2, name: "old", archived: true },
+          { id: "3", name: "bad id" },
+          { id: 4 },
+          null,
+        ] })
+        : null))
+      .install();
+    expect(await getTags("tok")).toEqual([{ id: 1, name: "ignore" }]);
+    expect((mock.calls[0]!.headers as Record<string, string>).Authorization).toBe("Bearer tok");
+  });
+
+  test("an unexpected body reads as no tags", async () => {
+    mock = new MockFetch().route((url) => (url.endsWith("/v2/tags") ? json({ nope: 1 }) : null)).install();
+    expect(await getTags("tok")).toEqual([]);
   });
 });
 
