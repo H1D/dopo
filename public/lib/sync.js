@@ -11,7 +11,7 @@
  * RELEASED across all network I/O in between.
  */
 
-import { LMError, applyCategories, getState, getTransaction, isOpen } from "./lm.js";
+import { LMError, applyCategories, getState, getTransaction, inScope } from "./lm.js";
 import { fetchWindow, queueMutate, ruleAdd, snapshotPrune } from "./store.js";
 
 /** @typedef {import("./store.js").QueueItem} QueueItem */
@@ -121,18 +121,20 @@ export async function replayQueue(token, opts = {}) {
 }
 
 /**
- * ONE membership recheck for the whole replay: current unreviewed window
+ * ONE membership recheck for the whole replay: current in-scope window
  * (getState — categories/accounts ride along; the price of reusing lm.js as-is),
  * then per-id fallback for misses in small parallel batches:
  *   404                 → skipped (deleted, or token re-pointed at another budget)
- *   still unreviewed    → safe    (merely outside the paged window / date range)
- *   reviewed            → skipped (someone or something got there first)
+ *   still in scope      → safe    (merely outside the paged window / date range)
+ *   out of scope        → skipped (reviewed elsewhere, or excluded by the user since)
+ * The window's scope (store.fetchWindow) is the membership test for BOTH stages.
  * @param {string} token
  * @param {QueueItem[]} items
  * @returns {Promise<{safe: QueueItem[], skipped: QueueItem[]}>}
  */
 async function recheckMembership(token, items) {
-  const state = await getState(token, fetchWindow());
+  const win = fetchWindow();
+  const state = await getState(token, win);
   const open = new Set(state.transactions.map((t) => t.id));
   /** @type {QueueItem[]} */
   const safe = [];
@@ -153,7 +155,7 @@ async function recheckMembership(token, items) {
     );
     batch.forEach((it, j) => {
       const t = current[j];
-      if (isOpen(t)) safe.push(it);
+      if (inScope(t, win.scope)) safe.push(it);
       else skipped.push(it);
     });
   }

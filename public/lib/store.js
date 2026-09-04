@@ -28,7 +28,7 @@
  */
 
 import { isRule } from "./rules.js";
-import { CUTOFF_PRESETS, DEFAULT_CUTOFF, cutoffRange } from "./lm.js";
+import { BUCKETS, CUTOFF_PRESETS, DEFAULT_CUTOFF, DEFAULT_SCOPE, cutoffRange } from "./lm.js";
 import { parseStep } from "./onboard.js";
 import { parsePicker } from "./picker.js";
 
@@ -38,6 +38,7 @@ export const LS_KEYS = {
   later: "dopo.later.v1",
   rules: "dopo.rules.v1",
   cutoff: "dopo.cutoff.v1",
+  scope: "dopo.scope.v1",
   audio: "dopo.audio.v1",
   music: "dopo.music.v1",
   onboard: "dopo.onboard.v1",
@@ -331,6 +332,78 @@ export function cutoffSave(id) {
 }
 
 // ---------------------------------------------------------------------------
+// deck scope — which buckets the deck holds, which of them the model looks at
+// unasked, and which tags keep a row out. A DEVICE PREFERENCE like the cutoff:
+// clearTokens() leaves it alone.
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} ScopePrefs
+ * @property {Record<import("./lm.js").Bucket, boolean>} include  buckets in the deck
+ * @property {Record<import("./lm.js").Bucket, boolean>} ai  buckets pass 1 runs on unasked
+ * @property {import("./lm.js").LMTag[]} skipTags  rows carrying any of these stay out (names kept so Settings renders offline)
+ */
+
+/** @returns {ScopePrefs} */
+export function defaultScopePrefs() {
+  return {
+    include: { ...DEFAULT_SCOPE.include },
+    ai: { ...DEFAULT_SCOPE.include },
+    skipTags: [],
+  };
+}
+
+/**
+ * @param {unknown} v
+ * @param {Record<import("./lm.js").Bucket, boolean>} fallback
+ * @returns {Record<import("./lm.js").Bucket, boolean>}
+ */
+function bucketFlags(v, fallback) {
+  const out = { ...fallback };
+  if (typeof v !== "object" || v === null) return out;
+  const rec = /** @type {Record<string, unknown>} */ (v);
+  for (const b of BUCKETS) if (typeof rec[b] === "boolean") out[b] = rec[b];
+  return out;
+}
+
+/**
+ * Per-field validation: a corrupted or older record degrades field by field to
+ * the defaults instead of resetting everything.
+ * @returns {ScopePrefs}
+ */
+export function scopeLoad() {
+  const d = defaultScopePrefs();
+  const v = lsGet(LS_KEYS.scope);
+  if (typeof v !== "object" || v === null) return d;
+  const rec = /** @type {Record<string, unknown>} */ (v);
+  /** @type {import("./lm.js").LMTag[]} */
+  const skipTags = [];
+  if (Array.isArray(rec.skipTags)) {
+    for (const t of rec.skipTags) {
+      if (t && typeof t === "object" && typeof t.id === "number" && typeof t.name === "string") skipTags.push({ id: t.id, name: t.name });
+    }
+  }
+  return {
+    include: bucketFlags(rec.include, d.include),
+    ai: bucketFlags(rec.ai, d.ai),
+    skipTags,
+  };
+}
+
+/**
+ * @param {ScopePrefs} prefs
+ * @throws on storage failure
+ */
+export function scopeSave(prefs) {
+  const d = defaultScopePrefs();
+  lsSet(LS_KEYS.scope, {
+    include: bucketFlags(prefs.include, d.include),
+    ai: bucketFlags(prefs.ai, d.ai),
+    skipTags: prefs.skipTags.map((t) => ({ id: t.id, name: t.name })),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // onboarding cursor — which wizard step to resume at (app.js decides whether
 // the wizard shows at all: `!tokens.lm || cursor`)
 // ---------------------------------------------------------------------------
@@ -472,16 +545,22 @@ export function musicStateSave(state) {
 }
 
 /**
- * The stored window, in `getState`/`applyCategories` opts shape. Every LM fetch —
- * the deck AND every membership recheck — goes through this so they page the SAME
- * range. A recheck narrower than the decisions it validates is still correct (misses
- * fall back to per-id GETs, see lib/lm.js applyCategories) but costs a round trip
- * each, so they must not drift apart.
- * @returns {{startDate: string, endDate: string}}
+ * The stored window + scope, in `getState`/`applyCategories` opts shape. Every LM
+ * fetch — the deck AND every membership recheck — goes through this so they page
+ * the SAME range under the SAME membership test. A recheck narrower than the
+ * decisions it validates is still correct (misses fall back to per-id GETs, see
+ * lib/lm.js applyCategories) but costs a round trip each, so they must not drift
+ * apart.
+ * @returns {{startDate: string, endDate: string, scope: import("./lm.js").Scope}}
  */
 export function fetchWindow() {
   const { start, end } = cutoffRange(cutoffLoad());
-  return { startDate: start, endDate: end };
+  const prefs = scopeLoad();
+  return {
+    startDate: start,
+    endDate: end,
+    scope: { include: prefs.include, skipTagIds: prefs.skipTags.map((t) => t.id) },
+  };
 }
 
 // ---------------------------------------------------------------------------

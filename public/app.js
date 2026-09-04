@@ -14,7 +14,8 @@ export {
 } from "./lib/card.js";
 
 import {
-  LMError, applyCategories, getMe, getState, getTransaction, isOpen, KEEPALIVE_MAX_ITEMS, CUTOFF_PRESETS,
+  LMError, applyCategories, getMe, getState, getTags, getTransaction, inScope, KEEPALIVE_MAX_ITEMS, CUTOFF_PRESETS,
+  BUCKETS,
 } from "./lib/lm.js";
 import { ORError, checkKey } from "./lib/classify.js";
 import { FREE_KEY, FREE_MODELS, FREE_CONCURRENCY } from "./lib/freekey.js";
@@ -24,7 +25,7 @@ import {
   snapshotPrune,
   laterLoad, laterAdd, laterRemove,
   rulesLoad, ruleAdd, rulesSave,
-  cutoffLoad, cutoffSave, fetchWindow,
+  cutoffLoad, cutoffSave, fetchWindow, scopeLoad, scopeSave,
   audioLoad, audioSave,
   onboardCursorLoad, onboardCursorSave, onboardCursorClear,
   pickerLoad, pickerSave, huesLoad, huesSave,
@@ -39,6 +40,7 @@ import {
 import { replayQueue, isPoisonStatus, STUCK_AFTER_ATTEMPTS } from "./lib/sync.js";
 import {
   assembleState, assembleFromSnapshot, attachSuggestions, classifyPass1, webCheck, merchantKeyOf,
+  mergeAi, wantsAi, askable,
 } from "./data.js";
 import {
   esc, splitEmoji, fmtAmountText, fmtTxnDate, isConfident as cardConfident, cardHTML, CONFIDENT_AT,
@@ -51,6 +53,8 @@ import { createMusic } from "./lib/music.js";
 /** @typedef {import("./data.js").UISuggestion} UISuggestion */
 /** @typedef {import("./data.js").Category} Category */
 /** @typedef {import("./lib/lm.js").LMAccount} Account */
+/** @typedef {import("./lib/lm.js").Bucket} Bucket */
+/** @typedef {import("./lib/lm.js").LMTag} LMTag */
 /** @typedef {import("./lib/store.js").QueueItem} QueueItem */
 /** @typedef {import("./lib/rules.js").Rule} Rule */
 /** @typedef {import("./lib/onboard.js").StepId} StepId */
@@ -121,7 +125,14 @@ function main() {
   let later = []; // full txn bodies (IndexedDB), pointers in localStorage; loaded in init
   let rules = rulesLoad();
   let cutoff = cutoffLoad(); // how far back the LM fetch window reaches
-  let cutoffDirty = false; // changed in Settings; the deck is redealt on sheet close
+  let scope = scopeLoad(); // which buckets the deck holds / the model sees unasked, and the skip tags
+  let deckDirty = false; // cutoff or scope changed in Settings; the deck is refetched + redealt on sheet close
+  /** @type {LMTag[]|null} */
+  let tagsKnown = null; // GET /tags — null until it lands (or after it failed); chips fall back to the saved skip tags
+  /** @type {Promise<void>|null} */
+  let tagsInFlight = null;
+  /** @type {Set<number>} */
+  const aiInflight = new Set(); // txn ids an "Ask AI" tap is asking about right now
   /** @type {PickerId|null} */
   let pickerPref = pickerLoad(); // null = never chose; resolvePickerPref() settles it at boot
   /** @type {Record<string, number>} */
@@ -268,21 +279,15 @@ function main() {
   let obChoice = null; // AI step radio; nothing pre-selected
   /** @type {ReturnType<typeof setTimeout>|null} */
   let obDebounce = null; // 600 ms after the last keystroke the field validates itself
-  // ---- picker step: the inline "try it" panel
-  let tryOpen = false; // the try panel owns the step body AND the wizard footer
+  // ---- picker step: the live try panel under the style chips
+  let tryOpen = false; // the panel is mounted (picker step showing)
   /** @type {PickerUI|null} */
   let tryEngine = null;
   /** @type {PkNode[]|null} */
-  let tryTree = null; // frozen for the session: a fetch landing mid-try must not swap it
-  let trySample = 0; // index into TRY_SAMPLES; each pick deals the next one
+  let tryTree = null;
+  let tryTreeReal = false; // built from the user's own categories (else the demo tree until they land)
+  let trySample = 0; // which sample transaction is on the table; each pick deals the next one
   let tryStart = 0; // performance.now() of the last mount, for the "· 0.8 s" readout
-  // ---- the ghost finger that demonstrates the picker on the onboarding step
-  /** @type {HTMLElement|null} */
-  let ghostEl = null;
-  /** @type {ReturnType<typeof setTimeout>[]} */
-  let ghostTimers = [];
-  let ghostOn = false; // false the instant the user touches the panel, for the rest of the step
-  let ghostTurn = 0; // rotates the demonstrated group/child so it never repeats itself
   /** @type {{lm: Promise<void>|null, or: Promise<void>|null}} */
   const obCheck = { lm: null, or: null }; // in-flight validation per field — Continue awaits it
   let obContinuing = false; // Continue re-entrancy latch (blur-validate + tap + Enter can land together)
@@ -392,6 +397,9 @@ function main() {
     orTokenInput: $input("#orTokenInput"), orTokenHint: $el("#orTokenHint"), orTokenError: $el("#orTokenError"),
     budgetLine: $el("#budgetLine"), webCheckLine: $el("#webCheckLine"), forgetBtn: $btn("#forgetBtn"),
     cutoffRow: $el("#cutoffRow"), cutoffLine: $el("#cutoffLine"),
+    skipTagsRow: $el("#skipTagsRow"), skipTagsNote: $el("#skipTagsNote"),
+    sgAccount: $el("#sgAccount"), sgAi: $el("#sgAi"), sgScope: $el("#sgScope"), sgPicker: $el("#sgPicker"),
+    obIncludeRows: $el("#obIncludeRows"), obSkipTagsRow: $el("#obSkipTagsRow"), obSkipTagsNote: $el("#obSkipTagsNote"),
     pickerRow: $el("#pickerRow"), pickerInfo: $el("#pickerInfo"), pickerTry: $btn("#pickerTry"),
     rulesNote: $el("#rulesNote"), rulesList: $el("#rulesList"),
     badgeToggle: $input("#badgeToggle"), settingsError: $el("#settingsError"), menuSettings: $btn("#menuSettings"),
@@ -405,7 +413,7 @@ function main() {
     obAiGroup: $el("#obAiGroup"), obOrField: $el("#obOrField"),
     obOrInput: $input("#obOrInput"), obOrShow: $btn("#obOrShow"), obOrHint: $el("#obOrHint"), obOrError: $el("#obOrError"),
     obCount: $el("#obCount"), obCutoffRow: $el("#obCutoffRow"),
-    obPickerRow: $el("#obPickerRow"), obPickerBlurb: $el("#obPickerBlurb"), obPickerTry: $btn("#obPickerTry"),
+    obPickerRow: $el("#obPickerRow"), obPickerBlurb: $el("#obPickerBlurb"),
     obPickerPanel: $el("#obPickerPanel"), obPickerSample: $el("#obPickerSample"),
     obPickerRoot: $el("#obPickerRoot"), obPickerResult: $el("#obPickerResult"),
     obNote: $el("#obNote"), obBack: $btn("#obBack"), obSecondary: $btn("#obSecondary"), obNext: $btn("#obNext"),
@@ -417,6 +425,9 @@ function main() {
   };
 
   // ---------- helpers ----------
+  /** Trust test for a category id Lunch Money holds on a row: only assignable leaves
+   *  we know may ride along as a suggestion. @param {number} id */
+  const isLeafId = (id) => catById.has(id);
   /** @param {number|number[]} p */
   const haptic = (p) => { try { navigator.vibrate?.(p); } catch { /* additive only */ } };
   /** @param {number} v @param {number} lo @param {number} hi */
@@ -535,7 +546,7 @@ function main() {
     noteConnOutcome("lm", null);
     if (data.truncated && !truncationNoted) {
       truncationNoted = true;
-      note(`Sorting the oldest ${allTxns.length}${data.total ? ` of ${data.total}` : ""} unreviewed`);
+      note(`Sorting the oldest ${allTxns.length}${data.total ? ` of ${data.total}` : ""} in range`);
     }
   }
 
@@ -571,7 +582,9 @@ function main() {
     // carry cached suggestions; hammering a dead network helps nobody). Explicit
     // user actions reach the network via refresh()/maybeWebCheck(true) instead.
     if (classifyRunning || loadState !== "live" || connOffline() || onboardingActive) return;
-    const unsuggested = [...set, ...backlog].filter((t) => !t.suggestion);
+    // per-bucket opt-in (Settings → AI suggestions): a card outside it keeps its
+    // "Ask AI" button instead; a card an Ask AI tap is already asking about is skipped
+    const unsuggested = [...set, ...backlog].filter((t) => wantsAi(t, scope.ai) && !aiInflight.has(t.id));
     if (!unsuggested.length) { maybeWebCheck(); return; }
     const creds = orCreds();
     if (!creds) { updateWebBar(); return; } // LM-only mode: bar offers the Settings path
@@ -629,10 +642,40 @@ function main() {
     if (!sugs.size) return;
     for (const t of allTxns) {
       const s = sugs.get(t.id);
-      if (s && !t.suggestion) t.suggestion = s; // rules/web/cache win over a late pass-1 result
+      if (!s) continue;
+      t.aiChecked = true;
+      // rules/web win over a late pass-1 result; a category Lunch Money already
+      // holds only yields to a confident disagreement (data.js mergeAi)
+      t.suggestion = mergeAi(t, s, isLeafId);
     }
     reconcile();
     maybeWebCheck();
+  }
+
+  /** "Ask AI" on one card: pass 1 for that row alone, whatever the per-bucket
+   *  automatic setting says. An explicit user action, so it tries the network even
+   *  when the reducer says offline. @param {number} id */
+  async function askAi(id) {
+    const t = allTxns.find((x) => x.id === id);
+    if (!t || aiInflight.has(id) || loadState !== "live") return;
+    const creds = orCreds();
+    if (!creds) { openSettingsSheet(null, { group: "ai" }); return; }
+    aiInflight.add(id);
+    renderStack(); // the button reads "Asking AI…"
+    try {
+      await classifyPass1(creds.key, categories, [t], absorbPass1Slice,
+        creds.free ? { model: FREE_MODELS[freeModelIdx] ?? FREE_MODELS[0], concurrency: FREE_CONCURRENCY } : {});
+      noteConnOutcome("or", null);
+      if (!t.aiChecked) note("AI had nothing to say about this one");
+    } catch (e) {
+      noteConnOutcome("or", e);
+      if (creds.free && e instanceof ORError && (e.quotaExhausted || e.status === 404)) onFreeQuota(e);
+      else if (!routeORError(e)) note("Couldn't ask AI — try again in a moment");
+    } finally {
+      aiInflight.delete(id);
+      renderStack();
+      maybeWebCheck();
+    }
   }
 
   // ---------- data layer: pass 2 (lazy web-check per unique merchant) ----------
@@ -683,8 +726,8 @@ function main() {
       webChecksUsed++; // counted on completion; webInflight covers the in-flight window
       for (const t of allTxns) {
         if (merchantKeyOf(t.merchant) !== key) continue;
-        if (t.suggestion?.source === "rule") continue; // rules stay on top
-        t.suggestion = sug;
+        t.aiChecked = true;
+        t.suggestion = mergeAi(t, sug, isLeafId); // rules stay on top; a held LM category only yields to a confident disagreement
       }
       reconcile();
     } catch (e) {
@@ -718,7 +761,7 @@ function main() {
       // would actually get a web check, and not on top of the upgrade banner.
       const free = onFreeTier();
       const wantsAI = !!tokens.lm && !(free && freeQuotaHit)
-        && [...set, ...backlog].some((t) => (free ? false : !t.suggestion) || webCandidateKey(t));
+        && [...set, ...backlog].some((t) => (free ? false : wantsAi(t, scope.ai)) || webCandidateKey(t));
       if (wantsAI) {
         els.webBarBtn.textContent = free
           ? "Your own OpenRouter key adds web checks for unsure merchants"
@@ -859,7 +902,8 @@ function main() {
    *  @param {string} lmToken @param {QueueItem[]} batch
    *  @returns {Promise<{sendable: QueueItem[], skipped: number[]}>} */
   async function membershipRecheck(lmToken, batch) {
-    const win = await getState(lmToken, fetchWindow());
+    const fw = fetchWindow();
+    const win = await getState(lmToken, fw);
     const open = new Set(win.transactions.map((t) => t.id));
     /** @type {QueueItem[]} */
     const sendable = [];
@@ -877,8 +921,8 @@ function main() {
         })));
       slice.forEach((it, j) => {
         const t = current[j];
-        if (isOpen(t)) sendable.push(it); // merely outside the paged window
-        else skipped.push(it.id); // reviewed elsewhere, or gone
+        if (inScope(t, fw.scope)) sendable.push(it); // merely outside the paged window
+        else skipped.push(it.id); // out of scope now (reviewed elsewhere, excluded since), or gone
       });
     }
     return { sendable, skipped };
@@ -1259,18 +1303,29 @@ function main() {
   /** @param {Txn} t @returns {string} */
   const cardSig = (t) => {
     const s = t.suggestion;
-    return s ? `${s.suggested_category_id}:${s.confidence}:${s.source}` : "none";
+    const ask = askAiState(t) ?? "-";
+    return s ? `${s.suggested_category_id}:${s.confidence}:${s.source}:${ask}` : `none:${ask}`;
   };
+
+  /** The card's "Ask AI" button: shown while the model could still add something
+   *  (data.js askable) and there is a key to ask with; busy while a tap is in flight.
+   *  Snapshot decks have no network, so no button. @param {Txn} t @returns {import("./lib/card.js").AskAi} */
+  function askAiState(t) {
+    if (aiInflight.has(t.id)) return "busy";
+    if (loadState !== "live" || !askable(t) || !orCreds()) return null;
+    return "idle";
+  }
 
   /** @param {Txn} t @returns {HTMLElement} */
   function buildCard(t) {
     const s = t.suggestion;
     const category = s && s.suggested_category_id != null ? catById.get(s.suggested_category_id) ?? null : null;
+    const held = t.category_id != null ? catById.get(t.category_id) ?? null : null;
     const el = document.createElement("div");
     el.className = `card${isConfident(t) ? "" : " unsure"}`;
     el.dataset.id = String(t.id);
     el.dataset.sig = cardSig(t);
-    el.innerHTML = cardHTML(t, { category, account: acctOf(t), confidentAt: CONFIDENT_AT });
+    el.innerHTML = cardHTML(t, { category, account: acctOf(t), held, askAi: askAiState(t), confidentAt: CONFIDENT_AT });
     return el;
   }
 
@@ -2111,9 +2166,101 @@ function main() {
     if (id === cutoff) return;
     cutoff = /** @type {import("./lib/lm.js").CutoffId} */ (id);
     try { cutoffSave(id); } catch { storageFailed(); }
-    cutoffDirty = true; // a full refetch mid-sheet would fight the open sheet — do it on close
+    deckDirty = true; // a full refetch mid-sheet would fight the open sheet — do it on close
     renderCutoffRow();
     haptic(8);
+  }
+
+  // ---------- settings: deck scope (buckets, automatic AI, skip tags) ----------
+  /** @param {string|undefined} v @returns {Bucket|null} */
+  const parseBucket = (v) => (v && BUCKETS.includes(/** @type {Bucket} */ (v)) ? /** @type {Bucket} */ (v) : null);
+  function saveScope() {
+    try { scopeSave(scope); } catch { storageFailed(); }
+  }
+  /** Checkbox states from `scope`; Settings and the wizard's tune step share the
+   *  data-include / data-ai markup. @param {HTMLElement} root */
+  function paintScopeRows(root) {
+    for (const input of root.querySelectorAll("input[data-include], input[data-ai]")) {
+      if (!(input instanceof HTMLInputElement)) continue;
+      const inc = parseBucket(input.dataset.include);
+      const ai = parseBucket(input.dataset.ai);
+      if (inc) input.checked = scope.include[inc];
+      else if (ai) input.checked = scope.ai[ai];
+    }
+  }
+  /** @param {Bucket} b @param {boolean} on @returns {boolean} changed */
+  function setIncludeFlag(b, on) {
+    if (scope.include[b] === on) return false;
+    scope.include[b] = on;
+    saveScope();
+    haptic(8);
+    return true;
+  }
+  /** @param {Bucket} b @param {boolean} on */
+  function setAiFlag(b, on) {
+    if (scope.ai[b] === on) return;
+    scope.ai[b] = on;
+    saveScope();
+    haptic(8);
+    ensureClassified(); // a bucket just switched on may have bare cards waiting
+    updateWebBar();
+  }
+  /** Skip-tag chips: every tag Lunch Money knows, plus any saved skip tag the fetch
+   *  didn't return (renamed, archived, offline) so it can still be switched off.
+   *  Both rows (Settings, wizard) are repainted together — they show one preference. */
+  function renderTagRows() {
+    const all = [...(tagsKnown ?? [])];
+    for (const t of scope.skipTags) if (!all.some((k) => k.id === t.id)) all.push(t);
+    const on = new Set(scope.skipTags.map((t) => t.id));
+    const chipHtml = (/** @type {LMTag} */ t) =>
+      `<button type="button" class="cutoff-chip tag-chip${on.has(t.id) ? " on" : ""}"
+        data-tag="${Number(t.id)}" aria-pressed="${on.has(t.id) ? "true" : "false"}">${esc(t.name)}</button>`;
+    const chipsHtml = all.map(chipHtml).join("");
+    let noteText;
+    if (all.length) noteText = `Tap a tag to keep its transactions out of the deck${on.size ? ` — skipping ${on.size}` : ""}.`;
+    else if (tagsInFlight) noteText = "Loading your tags…";
+    else if (tagsKnown === null) noteText = "Couldn't load your tags — dopo tries again next time.";
+    else noteText = "No tags in Lunch Money yet — tags you create there show up here.";
+    /** @type {[HTMLElement, HTMLElement][]} */
+    const targets = [[els.skipTagsRow, els.skipTagsNote], [els.obSkipTagsRow, els.obSkipTagsNote]];
+    for (const [row, noteEl] of targets) {
+      row.innerHTML = chipsHtml;
+      noteEl.textContent = noteText;
+    }
+  }
+  /** @param {number} id @returns {boolean} changed */
+  function toggleSkipTag(id) {
+    if (scope.skipTags.some((t) => t.id === id)) {
+      scope.skipTags = scope.skipTags.filter((t) => t.id !== id);
+    } else {
+      const tag = (tagsKnown ?? []).find((t) => t.id === id);
+      if (!tag) return false;
+      scope.skipTags = [...scope.skipTags, tag];
+    }
+    saveScope();
+    haptic(8);
+    renderTagRows();
+    return true;
+  }
+  /** GET /tags for the chips; one in flight at a time, the previous list stays
+   *  painted while it loads, a failure keeps whatever is saved. */
+  function loadTags() {
+    if (tagsInFlight) return tagsInFlight;
+    if (!tokens.lm) return Promise.resolve();
+    const token = tokens.lm;
+    tagsInFlight = getTags(token)
+      .then((tags) => { if (tokens.lm === token) tagsKnown = tags; })
+      .catch(() => { /* chips fall back to the saved skip tags; the note says so */ })
+      .finally(() => { tagsInFlight = null; renderTagRows(); });
+    renderTagRows();
+    return tagsInFlight;
+  }
+  /** Settings is a short menu of <details> groups; open the one that has
+   *  something to show and bring it into view. @param {"account"|"ai"|"scope"|"picker"} name */
+  function openSettingsGroup(name) {
+    const el = name === "account" ? els.sgAccount : name === "ai" ? els.sgAi : name === "scope" ? els.sgScope : els.sgPicker;
+    el.toggleAttribute("open", true);
+    requestAnimationFrame(() => { if (!els.settingsSheet.hidden) el.scrollIntoView({ block: "start" }); });
   }
 
   // ---------- settings: category picker ----------
@@ -2201,10 +2348,10 @@ function main() {
       // a normal open (it pushes its own entry): the pick sheet's close already
       // consumed the one Settings handed forward, so adopting here would leave
       // the reopened sheet with no history entry and a dead hardware Back
-      openSettingsSheet(null);
+      openSettingsSheet(null, { group: "picker" });
       // openSheet focuses inside a rAF; this one is queued after it, same frame
       requestAnimationFrame(() => els.pickerTry.focus());
-      if (cutoffDirty) void applyCutoffChange();
+      if (deckDirty) void applyDeckChange();
     }, wait);
   }
 
@@ -2231,11 +2378,11 @@ function main() {
     return "Category";
   }
 
-  /** A changed cutoff means a different window entirely: refetch and redeal from
-   *  scratch rather than reconcile(), which would preserve a top card that may now
-   *  be out of range. */
-  async function applyCutoffChange() {
-    cutoffDirty = false;
+  /** A changed cutoff or scope means a different window entirely: refetch and
+   *  redeal from scratch rather than reconcile(), which would preserve a top card
+   *  that may now be out of range. */
+  async function applyDeckChange() {
+    deckDirty = false;
     if (loadState === "none") { retryLoad(); return; }
     try {
       await fetchState();
@@ -2313,7 +2460,9 @@ function main() {
   }
 
   /** @param {"lm"|"or"|null} deadField  names the token the upstream just rejected
-   *  @param {{adoptHistory?: boolean}} [opts]  the picker preview handing the sheet back */
+   *  @param {{adoptHistory?: boolean, group?: "account"|"ai"|"scope"|"picker"}} [opts]  adoptHistory: the
+   *  picker preview handing the sheet back; group: the <details> group to open (a dead
+   *  token opens its own group regardless) */
   function openSettingsSheet(deadField, opts = {}) {
     closeMenu();
     els.lmTokenInput.value = "";
@@ -2330,11 +2479,16 @@ function main() {
     els.musicToggle.checked = audioPrefs.music;
     els.sfxToggle.checked = audioPrefs.sfx;
     renderCutoffRow();
+    paintScopeRows(els.settingsSheet);
+    renderTagRows();
+    if (tokens.lm && deadField !== "lm") void loadTags();
     renderPickerRow(els.pickerRow, pickerPref ?? "list", els.pickerInfo);
     renderRulesList();
     if (deadField === "lm") setFieldError("lm", "This Lunch Money token stopped working — paste a fresh one.");
     if (deadField === "or") setFieldError("or", "This OpenRouter key stopped working — paste a fresh one.");
     openSheet(els.settingsSheet, { adoptHistory: opts.adoptHistory === true });
+    const group = deadField === "lm" ? "account" : deadField === "or" ? "ai" : opts.group ?? (!tokens.lm ? "account" : null);
+    if (group) openSettingsGroup(group);
     updateWebCheckLine(); // after openSheet: the line only paints while the sheet is visible
     if (tokens.lm && deadField !== "lm") {
       // budget name display; a failure leaves the sheet perfectly usable
@@ -2349,8 +2503,8 @@ function main() {
   function closeSettingsSheet() {
     disarmForget();
     closeSheet(els.settingsSheet);
-    if (!cutoffDirty) return false;
-    void applyCutoffChange();
+    if (!deckDirty) return false;
+    void applyDeckChange();
     return true;
   }
 
@@ -2462,7 +2616,7 @@ function main() {
     clearTokens(); // tokens AND the wizard cursor
     tokens = getTokens();
     replayedFor = null;
-    cutoffDirty = false; // the wizard refetches on its own; no redeal owed on the next sheet close
+    deckDirty = false; // the wizard refetches on its own; no redeal owed on the next sheet close
     disarmSaveAnyway();
     els.lmTokenHint.hidden = true;
     paintOrHint(); // back on the shared free tier, if there is one
@@ -2580,7 +2734,7 @@ function main() {
     if (id === "picker") obEnterPicker();
     obShowPanel(id);
     obRender();
-    if (id === "tune") obRenderTune();
+    if (id === "tune") { void loadTags(); obRenderTune(); }
     if (id === "done") {
       // the sound toggles live here; paint the truth (a cursor resume must not show an
       // unchecked box for music that is actually on), and keep the quiet preload the
@@ -2874,7 +3028,7 @@ function main() {
     }
     if (!tokens.lm || (loadState === "live" && !opts.force)) return Promise.resolve();
     const run = async () => {
-      const loadedCutoff = cutoff;
+      const loadedWindow = windowKey();
       try {
         await fetchState();
         backlog = eligible(allTxns).sort(byConfDesc);
@@ -2887,9 +3041,10 @@ function main() {
         loadInFlight = null;
         loadInFlightFor = null;
       }
-      // chip tapped mid-fetch — but not on a token that just bounced us back to the lm step
-      if (cutoff !== loadedCutoff && onboardingActive && !obDead.lm) { await loadDeckQuiet({ force: true }); return; }
+      // chip / checkbox tapped mid-fetch — but not on a token that just bounced us back to the lm step
+      if (windowKey() !== loadedWindow && onboardingActive && !obDead.lm) { await loadDeckQuiet({ force: true }); return; }
       obRenderTune();
+      obPreviewRefresh(); // the picker step may be showing the demo tree: swap in the real one
     };
     stateError = null;
     loadInFlightFor = tokens.lm;
@@ -2903,19 +3058,25 @@ function main() {
   function obRenderTune() {
     if (!onboardingActive || obStep !== "tune") return;
     renderCutoffRow(els.obCutoffRow, null);
+    paintScopeRows(els.onboard);
+    renderTagRows();
     let msg;
     if (loadInFlight) msg = "Loading your transactions…";
     else if (loadState === "live" && !stateError) {
       const { startDate } = fetchWindow();
-      msg = `${backlog.length} unreviewed transaction${backlog.length === 1 ? "" : "s"} since ${fmtTxnDate(startDate)}`;
+      msg = `${backlog.length} transaction${backlog.length === 1 ? "" : "s"} to sort since ${fmtTxnDate(startDate)}`;
     } else if (connOffline()) msg = "You're offline — dopo loads your transactions when you reconnect.";
     else if (stateError) msg = "Couldn't load yet — dopo retries when you start.";
     else { msg = "Loading your transactions…"; void obLoad({}); }
     els.obCount.textContent = msg;
   }
 
+  /** Identity of the fetch window as the wizard sees it (cutoff + buckets + skip
+   *  tags): a change mid-fetch means the landed deck is already stale. */
+  const windowKey = () => `${cutoff}|${BUCKETS.map((b) => (scope.include[b] ? "1" : "0")).join("")}|${scope.skipTags.map((t) => t.id).join(",")}`;
+
   /** Wizard cutoff chip: same persistence as Settings, but the refetch happens right
-   *  away (there is no open deck to fight) — never through cutoffDirty. @param {string} id */
+   *  away (there is no open deck to fight) — never through deckDirty. @param {string} id */
   function obPickCutoff(id) {
     if (id === cutoff) return;
     cutoff = /** @type {import("./lib/lm.js").CutoffId} */ (id);
@@ -2926,64 +3087,72 @@ function main() {
   }
 
   // ---------- onboarding: the picker step ----------
-  /** Three merchants, dealt in turn — one pick is not enough to judge a picker,
-   *  and a static sample makes the second pick pure muscle memory. */
+  // The chips pick a style; the panel under them IS that picker, live, on the
+  // user's own categories (the deck has usually landed by now — the demo tree
+  // stands in until it does) and on their own transactions. Nothing here touches
+  // Lunch Money: a pick just deals the next sample.
+
+  /** Stand-ins while the deck is still loading, or when it is empty. */
   const TRY_SAMPLES = [
     { merchant: "Albert Heijn", amount: 42.17, currency: "eur" },
     { merchant: "NS Reizigers", amount: 8.4, currency: "eur" },
     { merchant: "Spotify", amount: 11.99, currency: "eur" },
   ];
 
-  /** Entering the step: chips painted, then the preview starts demonstrating
-   *  itself. The default is persisted here so "never tapped a chip" still leaves
-   *  a real choice behind. */
+  /** Entering the step: chips + blurb painted, panel mounted on the next frame.
+   *  The default is persisted here so "never tapped a chip" still leaves a real
+   *  choice behind. */
   function obEnterPicker() {
     if (pickerPref === null) {
       pickerPref = "tiles";
       try { pickerSave(pickerPref); } catch { /* session-only then */ }
     }
     renderPickerRow(els.obPickerRow, pickerPref, els.obPickerBlurb);
-    els.obPickerBlurb.hidden = true; // the live preview says more than the blurb did
-    // the panel is measured on mount (fits(), grid columns, ghost coordinates) and
-    // obShowPanel only unhides this step AFTER us — so start on the next frame
+    // the panel is measured on mount (fits(), grid columns) and obShowPanel only
+    // unhides this step AFTER us — so mount on the next frame
     requestAnimationFrame(() => {
       if (obStep === "picker" && onboardingActive) obPreviewStart();
     });
   }
 
-  /** Mount the engine and set the ghost finger going. Idempotent per step. */
+  /** Mount the panel. Idempotent per step. */
   function obPreviewStart() {
     if (obStep !== "picker" || !onboardingActive) return;
     if (!tryOpen) {
       tryOpen = true;
-      // frozen for the whole session: a fetch landing mid-preview must not swap the tree
-      const cats = categories.length ? categories : DEMO_CATEGORIES;
-      tryTree = pickerTree(cats, cats !== DEMO_CATEGORIES);
+      obTryBuildTree();
       trySample = 0;
       els.obPickerResult.textContent = "";
     }
     obTryMount();
-    obGhostStart();
   }
 
-  /** Leaving the step (or the wizard): the engine and its ghost both go. */
+  /** The tree the panel shows: the user's own categories when the deck has
+   *  landed, the demo tree until then. */
+  function obTryBuildTree() {
+    const cats = categories.length ? categories : DEMO_CATEGORIES;
+    tryTreeReal = cats !== DEMO_CATEGORIES;
+    tryTree = pickerTree(cats, tryTreeReal);
+  }
+
+  /** The deck landed while the panel was showing the demo tree: swap in the real
+   *  one. Called from the wizard's quiet load; a no-op everywhere else. */
+  function obPreviewRefresh() {
+    if (!tryOpen || tryTreeReal || !categories.length || obStep !== "picker") return;
+    obTryBuildTree();
+    obTryMount();
+  }
+
+  /** Leaving the step (or the wizard): the engine goes. */
   function obPreviewStop() {
-    obGhostStop();
     if (!tryOpen) return;
     tryOpen = false;
     tryEngine?.destroy();
     tryEngine = null;
     tryTree = null;
+    tryTreeReal = false;
     els.obPickerRoot.replaceChildren();
     els.obPickerResult.textContent = "";
-  }
-
-  /** The big button hands the panel over: the ghost retires, the keyboard lands
-   *  on the first target. Everything else was already live. */
-  function obTryHandOver() {
-    obGhostStop();
-    const el = els.obPickerRoot.querySelector(".pk-tile, .pk-sr button");
-    if (el instanceof HTMLElement) el.focus({ preventScroll: true });
   }
 
   /** Mount (or re-mount) the engine for the current sample + variant. The result
@@ -2996,8 +3165,7 @@ function main() {
     tryEngine = null;
     els.obPickerRoot.replaceChildren();
     if ((pickerPref ?? "tiles") === "list") {
-      // the list has nothing to demo inline — it is the sheet they already know
-      obGhostStop();
+      // the list has nothing to try inline — it is the sheet they already know
       const p = document.createElement("p");
       p.className = "settings-info";
       p.textContent = "List is the classic scrolling sheet you'll see on the deck.";
@@ -3012,8 +3180,7 @@ function main() {
       guessId: randomLeaf(tree)?.catId ?? null,
       recentIds: [], // nothing has been picked yet: a "recent" dot here would be a lie
       onPick: obTryPick,
-      onCancel: obGhostStop, // Escape at the top level: the panel stays, the demo doesn't
-      onInteract: obGhostStop, // the first real touch retires the ghost for good
+      onCancel: () => { /* Escape at the top level: the panel simply stays */ },
       deps: { haptic: (ms) => haptic(ms), reducedMotion },
     });
     tryEngine = engine;
@@ -3024,11 +3191,23 @@ function main() {
       els.obPickerResult.textContent = "Cramped on this screen — bigger on the deck";
     }
     tryStart = performance.now();
+    // the chip tap that (re)mounted this must not double as the first pick
     setTimeout(() => { if (tryEngine === engine) engine.arm(); }, 160);
   }
 
+  /** The sample on the table: one of the user's own transactions when the deck
+   *  has landed, a stand-in otherwise. @returns {{merchant: string, amount: number|string, currency: string}|undefined} */
+  function obTrySample() {
+    const own = tryTreeReal ? backlog : [];
+    if (own.length) {
+      const t = own[trySample % own.length];
+      if (t) return { merchant: t.merchant || t.payee || "Unknown", amount: t.amount, currency: t.currency };
+    }
+    return TRY_SAMPLES[trySample % TRY_SAMPLES.length];
+  }
+
   function obTryRenderSample() {
-    const s = TRY_SAMPLES[trySample % TRY_SAMPLES.length];
+    const s = obTrySample();
     els.obPickerSample.replaceChildren();
     const name = document.createElement("span");
     name.textContent = s?.merchant ?? "";
@@ -3050,115 +3229,6 @@ function main() {
     trySample++;
     // the engine keeps its DOM until the hit flash has played
     setTimeout(() => { if (tryOpen) obTryMount(); }, 150);
-    if (ghostOn) obGhostAt(GHOST.beat, obGhostRun); // …and the next sample demos itself
-  }
-
-  // ---- the ghost finger ----------------------------------------------------
-  //
-  // A translucent circle that plays the same picks a finger would, through the
-  // engine's demo API — so what the step shows IS the picker, not an animation
-  // of one. It never counts as input: the engine's onInteract fires on the first
-  // REAL touch and takes the ghost off the screen for the rest of the step.
-
-  /** Beats of one scripted pick, ms. `beat` is the pause after a commit. */
-  const GHOST = { lead: 400, move: 150, press: 40, hold: 700, drag: 170, beat: 1350, watchdog: 4200 };
-
-  /** @param {number} ms @param {() => void} fn */
-  function obGhostAt(ms, fn) {
-    const t = setTimeout(() => {
-      if (ghostOn && tryOpen && obStep === "picker" && onboardingActive) fn();
-    }, ms);
-    ghostTimers.push(t);
-  }
-
-  function obGhostStop() {
-    ghostOn = false;
-    for (const t of ghostTimers) clearTimeout(t);
-    ghostTimers = [];
-    ghostEl?.remove();
-    ghostEl = null;
-  }
-
-  function obGhostStart() {
-    obGhostStop();
-    if ((pickerPref ?? "tiles") === "list") return;
-    ghostOn = true;
-    obGhostAt(GHOST.lead, obGhostRun);
-  }
-
-  /** @param {{x: number, y: number}} pt  root-relative */
-  function obGhostMove(pt) {
-    const g = ghostEl ?? document.createElement("div");
-    if (!ghostEl) {
-      ghostEl = g;
-      g.className = "pk-ghost";
-      g.setAttribute("aria-hidden", "true");
-    }
-    const rr = els.obPickerRoot.getBoundingClientRect();
-    const pr = els.obPickerPanel.getBoundingClientRect();
-    // set the position BEFORE the first append: an appended-then-moved ghost
-    // would slide in from the panel's top-left corner
-    g.style.setProperty("--gx", `${Math.round(pt.x + rr.left - pr.left)}px`);
-    g.style.setProperty("--gy", `${Math.round(pt.y + rr.top - pr.top)}px`);
-    if (g.parentNode !== els.obPickerPanel) els.obPickerPanel.appendChild(g);
-  }
-
-  /** @param {boolean} on */
-  function obGhostPress(on) {
-    ghostEl?.classList.toggle("pk-ghost-press", on);
-  }
-
-  /** One scripted pick: a group, then one of its children — or, every fourth
-   *  round, a one-tap top-level leaf. @returns {{first: string, second: string|null}|null} */
-  function obGhostPlan() {
-    const tree = tryTree ?? [];
-    const groups = tree.filter((n) => n.kind === "group" && n.children.length > 0);
-    const leaves = tree.filter((n) => n.kind === "leaf");
-    ghostTurn++;
-    const leaf = leaves[ghostTurn % Math.max(1, leaves.length)];
-    if (leaf && ghostTurn % 4 === 3) return { first: leaf.key, second: null };
-    const g = groups[ghostTurn % Math.max(1, groups.length)];
-    if (!g || g.kind !== "group") return leaf ? { first: leaf.key, second: null } : null;
-    const c = g.children[(ghostTurn * 3) % g.children.length];
-    return c ? { first: g.key, second: c.key } : null;
-  }
-
-  /** Drives one round; the next one is scheduled by obTryPick's commit. */
-  function obGhostRun() {
-    for (const t of ghostTimers) clearTimeout(t);
-    ghostTimers = [];
-    const engine = tryEngine;
-    const plan = obGhostPlan();
-    if (!engine || !plan) return;
-    const wheel = (pickerPref ?? "tiles") === "wheel";
-    const first = engine.demo.spot(plan.first);
-    if (!first) return;
-    // a round that commits nothing (a variant swapped mid-flight) still restarts
-    obGhostAt(GHOST.watchdog, obGhostRun);
-    obGhostMove(first);
-    obGhostAt(GHOST.move, () => {
-      obGhostPress(true);
-      obGhostAt(GHOST.press, () => {
-        obGhostPress(false);
-        const second = plan.second;
-        if (second === null) { engine.demo.act(plan.first); return; }
-        if (wheel) engine.demo.hold(plan.first); else engine.demo.act(plan.first);
-        obGhostAt(GHOST.hold, () => {
-          const to = engine.demo.spot(second);
-          if (!to) return;
-          obGhostMove(to);
-          obGhostAt(GHOST.move, () => {
-            if (wheel) {
-              engine.demo.slide(second);
-              obGhostAt(GHOST.drag, () => engine.demo.release(second));
-              return;
-            }
-            obGhostPress(true);
-            obGhostAt(GHOST.press, () => { obGhostPress(false); engine.demo.act(second); });
-          });
-        });
-      });
-    });
   }
 
   /** @param {number} catId @returns {{node: PkLeaf, top: boolean}|null} */
@@ -3203,6 +3273,7 @@ function main() {
       if (tokens.lm !== prev.lm) {
         replayedFor = null; // the persisted queue must replay under the new token
         fetchGen++; // and a fetch still paginating under the old one must not commit
+        tagsKnown = null; // another budget's tags
       }
     }
     if (partial.or !== undefined) {
@@ -3687,6 +3758,12 @@ function main() {
       const t = e.target instanceof Element ? e.target : null;
       if (!t) return;
       if (t.closest(".cat-chip")) { actPick(); return; }
+      const ask = t.closest(".ask-ai");
+      if (ask) {
+        const card = ask.closest(".card");
+        if (card instanceof HTMLElement && card.dataset.id) void askAi(Number(card.dataset.id));
+        return;
+      }
       const tog = t.closest(".details-toggle");
       if (tog) {
         const card = tog.closest(".card");
@@ -3718,6 +3795,19 @@ function main() {
     els.cutoffRow.addEventListener("click", (e) => {
       const b = e.target instanceof Element ? e.target.closest("[data-cutoff]") : null;
       if (b instanceof HTMLElement && b.dataset.cutoff) pickCutoff(b.dataset.cutoff);
+    });
+    // scope checkboxes (include / automatic AI) — Settings applies include changes on close, like the cutoff
+    els.settingsSheet.addEventListener("change", (e) => {
+      const input = e.target instanceof HTMLInputElement ? e.target : null;
+      if (!input) return;
+      const inc = parseBucket(input.dataset.include);
+      const ai = parseBucket(input.dataset.ai);
+      if (inc) { if (setIncludeFlag(inc, input.checked)) deckDirty = true; }
+      else if (ai) setAiFlag(ai, input.checked);
+    });
+    els.skipTagsRow.addEventListener("click", (e) => {
+      const b = e.target instanceof Element ? e.target.closest("[data-tag]") : null;
+      if (b instanceof HTMLElement && b.dataset.tag && toggleSkipTag(Number(b.dataset.tag))) deckDirty = true;
     });
     els.pickerRow.addEventListener("click", (e) => {
       const b = e.target instanceof Element ? e.target.closest("[data-picker]") : null;
@@ -3753,13 +3843,10 @@ function main() {
       if (!(b instanceof HTMLElement) || !b.dataset.picker) return;
       if (!setPickerPref(b.dataset.picker)) return;
       renderPickerRow(els.obPickerRow, pickerPref ?? "tiles", els.obPickerBlurb);
-      els.obPickerBlurb.hidden = true;
-      // a chip is a request to SEE that variant: remount and let the ghost demo it
+      // a chip is a request to SEE that variant: remount the panel on it
       els.obPickerResult.textContent = "";
       obTryMount();
-      obGhostStart();
     });
-    els.obPickerTry.addEventListener("click", obTryHandOver);
     els.obLmInput.addEventListener("input", () => obOnInput("lm"));
     els.obOrInput.addEventListener("input", () => obOnInput("or"));
     els.obLmInput.addEventListener("blur", () => obOnBlur("lm"));
@@ -3778,8 +3865,18 @@ function main() {
       const b = e.target instanceof Element ? e.target.closest("[data-cutoff]") : null;
       if (b instanceof HTMLElement && b.dataset.cutoff) obPickCutoff(b.dataset.cutoff);
     });
+    // wizard scope controls: refetch right away, like the wizard's cutoff chip
+    els.obIncludeRows.addEventListener("change", (e) => {
+      const input = e.target instanceof HTMLInputElement ? e.target : null;
+      const inc = input ? parseBucket(input.dataset.include) : null;
+      if (input && inc && setIncludeFlag(inc, input.checked)) void obLoad({ force: true });
+    });
+    els.obSkipTagsRow.addEventListener("click", (e) => {
+      const b = e.target instanceof Element ? e.target.closest("[data-tag]") : null;
+      if (b instanceof HTMLElement && b.dataset.tag && toggleSkipTag(Number(b.dataset.tag))) void obLoad({ force: true });
+    });
     els.onboard.addEventListener("keydown", (e) => {
-      if (tryOpen) return; // the engine already consumed what it wanted; Enter must not advance
+      if (tryOpen) return; // the try panel is live: Enter belongs to the picker, never to Continue
       // Enter in a token field = Continue (when enabled); radios keep their native keys
       if (e.key !== "Enter" || !(e.target instanceof HTMLInputElement) || e.target.type === "radio") return;
       e.preventDefault();
@@ -3787,13 +3884,13 @@ function main() {
     });
     els.updateBtn.addEventListener("click", applyUpdate);
     els.webBarBtn.addEventListener("click", () => {
-      if (els.webBar.dataset.mode === "hint") { openSettingsSheet(null); return; }
+      if (els.webBar.dataset.mode === "hint") { openSettingsSheet(null, { group: "ai" }); return; }
       // explicit spend consent: grant allowance for everything currently pending
       webExtraAllowance += Math.max(0, pendingWebKeys().size - webBudget());
       maybeWebCheck(true); // explicit user action: always try the network
     });
     els.stuckBanner.addEventListener("click", onStuckTap);
-    els.upgradeBanner.addEventListener("click", () => openSettingsSheet(null));
+    els.upgradeBanner.addEventListener("click", () => openSettingsSheet(null, { group: "ai" }));
     els.badgeToggle.addEventListener("change", async () => {
       badgeEnabled = els.badgeToggle.checked;
       try { localStorage.setItem(LS.badge, badgeEnabled ? "1" : "0"); } catch { /* session-only then */ }

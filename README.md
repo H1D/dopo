@@ -83,8 +83,13 @@ the fix — your own key. No web checks on the free tier (they cost real money).
 | Pass 1 — batch classification | every unsuggested transaction, batches of 8 | ~$0.06 per 500 transactions |
 | Pass 2 — web check | once per **unique** merchant the model was unsure about (auto-capped at 15 per session, more behind an explicit button) | $0.0075 per merchant, cached — you pay at most once per merchant while the cache persists |
 
-Sorting less costs less: **Settings → Sort from** sets how far back dopo fetches (last week, last
-month, last 3 months, or this year — the default), so pass 1 only classifies what's in range.
+Sorting less costs less: **Settings → What to sort** sets how far back dopo fetches (last week, last
+month, last 3 months, or this year — the default), which transactions are in the deck (uncategorized,
+categorized-but-unreviewed, reviewed — the first two by default) and which Lunch Money tags keep a
+transaction out. **Settings → AI suggestions** picks which of those the model looks at unasked (same
+defaults); every other card gets an "Ask AI" button. On a transaction Lunch Money already categorized
+(its own rules, the bank feed), the model is a second opinion: it only takes the card when it is
+confident and disagrees.
 
 Rules are free and yours: a rule is made from the undo toast right after you sort a card ("Always: *merchant* →
 *category*") and matches instantly and offline forever after; review or delete them under

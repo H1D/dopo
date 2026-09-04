@@ -105,68 +105,130 @@
     <button class="sheet-close" id="settingsClose" aria-label="Close">✕</button>
   </div>
   <div class="sheet-body">
-    <div class="sheet-section">Tokens</div>
-    <div class="settings-info">Tokens are stored only in this browser and sent only to
-      Lunch Money and OpenRouter — never to the host serving this page.</div>
-    <div class="field">
-      <label class="field-label" for="lmTokenInput">Lunch Money API token</label>
-      <input class="field-input" id="lmTokenInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste token">
-      <div class="field-sub">Required. Create one at
-        <a href="https://my.lunchmoney.app/developers" target="_blank" rel="noopener">my.lunchmoney.app/developers</a>
-        — it has full account access, treat it like a bank password.</div>
-      <div class="field-hint" id="lmTokenHint" hidden></div>
-      <div class="field-error" id="lmTokenError" role="status" hidden></div>
-    </div>
-    <div class="field">
-      <label class="field-label" for="orTokenInput">OpenRouter API key</label>
-      <input class="field-input" id="orTokenInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste key">
-      <div class="field-sub">Optional. Without one, dopo uses a shared free key: a smaller free
-        model, a daily quota shared by everyone, no web checks — and free models may train on
-        what they see. Your own key lifts all of that: create a dedicated one with a spend limit at
-        <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</div>
-      <div class="field-hint" id="orTokenHint" hidden></div>
-      <div class="field-error" id="orTokenError" role="status" hidden></div>
-    </div>
-    <div class="settings-info" id="budgetLine" hidden></div>
-    <div class="settings-info" id="webCheckLine" hidden></div>
-    <div class="sheet-section">Sort from</div>
-    <div class="settings-info">How far back the deck reaches. Older transactions stay
-      unreviewed in Lunch Money until you widen this.</div>
-    <div class="cutoff-row" id="cutoffRow" role="group" aria-label="How far back to sort"></div>
-    <div class="settings-info" id="cutoffLine"></div>
-    <div class="sheet-section">Category picker</div>
-    <div class="settings-info">How the category sheet lays out when you tap a card.</div>
-    <div class="cutoff-row" id="pickerRow" role="group" aria-label="Picker style"></div>
-    <p class="settings-info" id="pickerInfo"></p>
-    <button type="button" class="try-btn" id="pickerTry">Try it</button>
-    <div class="sheet-section">Local rules</div>
-    <div class="settings-info" id="rulesNote"></div>
-    <div id="rulesList"></div>
-    <div class="sheet-section">App badge</div>
-    <label class="toggle-row">
-      <input type="checkbox" id="badgeToggle">
-      <span class="toggle-text">Badge on the app icon
-        <span class="toggle-sub">Shows how many cards were left to sort when you last closed dopo.</span>
-      </span>
-    </label>
-    <div class="sheet-section">Sound</div>
-    <label class="toggle-row">
-      <input type="checkbox" id="musicToggle">
-      <span class="toggle-text">Chiptune music
-        <span class="toggle-sub">Keygen-era tracker tunes while you sort — shuffled, a fresh one
-          every visit. The ♪ button up top shows what's playing; your device's
-          media controls (lock screen, headphones) pause and skip it.</span>
-      </span>
-    </label>
-    <label class="toggle-row">
-      <input type="checkbox" id="sfxToggle">
-      <span class="toggle-text">Sound effects
-        <span class="toggle-sub">Bleeps on swipes, thuds on landings, a fanfare at inbox zero.</span>
-      </span>
-    </label>
+    <details class="settings-group" id="sgAccount">
+      <summary class="settings-summary">Lunch Money account</summary>
+      <div class="settings-info">Tokens are stored only in this browser and sent only to
+        Lunch Money and OpenRouter — never to the host serving this page.</div>
+      <div class="field">
+        <label class="field-label" for="lmTokenInput">Lunch Money API token</label>
+        <input class="field-input" id="lmTokenInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste token">
+        <div class="field-sub">Required. Create one at
+          <a href="https://my.lunchmoney.app/developers" target="_blank" rel="noopener">my.lunchmoney.app/developers</a>
+          — it has full account access, treat it like a bank password.</div>
+        <div class="field-hint" id="lmTokenHint" hidden></div>
+        <div class="field-error" id="lmTokenError" role="status" hidden></div>
+      </div>
+      <div class="settings-info" id="budgetLine" hidden></div>
+      <button class="forget-btn" id="forgetBtn" type="button" hidden>Forget tokens on this device</button>
+    </details>
+
+    <details class="settings-group" id="sgAi">
+      <summary class="settings-summary">AI suggestions</summary>
+      <div class="field">
+        <label class="field-label" for="orTokenInput">OpenRouter API key</label>
+        <input class="field-input" id="orTokenInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste key">
+        <div class="field-sub">Optional. Without one, dopo uses a shared free key: a smaller free
+          model, a daily quota shared by everyone, no web checks — and free models may train on
+          what they see. Your own key lifts all of that: create a dedicated one with a spend limit at
+          <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.</div>
+        <div class="field-hint" id="orTokenHint" hidden></div>
+        <div class="field-error" id="orTokenError" role="status" hidden></div>
+      </div>
+      <div class="settings-info" id="webCheckLine" hidden></div>
+      <div class="sheet-section">Ask AI automatically about</div>
+      <label class="toggle-row">
+        <input type="checkbox" data-ai="uncategorized">
+        <span class="toggle-text">Uncategorized
+          <span class="toggle-sub">Cards with no category yet.</span>
+        </span>
+      </label>
+      <label class="toggle-row">
+        <input type="checkbox" data-ai="unreviewed">
+        <span class="toggle-text">Categorized, not reviewed
+          <span class="toggle-sub">Lunch Money's rules or the bank feed already picked one — AI gives a
+            second opinion and only speaks up when it disagrees.</span>
+        </span>
+      </label>
+      <label class="toggle-row">
+        <input type="checkbox" data-ai="reviewed">
+        <span class="toggle-text">Reviewed
+          <span class="toggle-sub">Only matters when reviewed transactions are in the deck.</span>
+        </span>
+      </label>
+      <div class="settings-info">Every other card gets an “Ask AI” button instead.</div>
+    </details>
+
+    <details class="settings-group" id="sgScope" open>
+      <summary class="settings-summary">What to sort</summary>
+      <div class="sheet-section">Sort from</div>
+      <div class="settings-info">How far back the deck reaches. Older transactions stay
+        untouched in Lunch Money until you widen this.</div>
+      <div class="cutoff-row" id="cutoffRow" role="group" aria-label="How far back to sort"></div>
+      <div class="settings-info" id="cutoffLine"></div>
+      <div class="sheet-section">Include</div>
+      <label class="toggle-row">
+        <input type="checkbox" data-include="uncategorized">
+        <span class="toggle-text">Uncategorized
+          <span class="toggle-sub">No category yet.</span>
+        </span>
+      </label>
+      <label class="toggle-row">
+        <input type="checkbox" data-include="unreviewed">
+        <span class="toggle-text">Categorized, not reviewed
+          <span class="toggle-sub">Lunch Money already picked one — confirm it with a swipe, or change it.</span>
+        </span>
+      </label>
+      <label class="toggle-row">
+        <input type="checkbox" data-include="reviewed">
+        <span class="toggle-text">Reviewed
+          <span class="toggle-sub">Re-sort what's already done. Sorting a card re-files it.</span>
+        </span>
+      </label>
+      <div class="sheet-section">Skip tagged</div>
+      <div class="settings-info" id="skipTagsNote">Transactions carrying any of these tags stay out of the deck.</div>
+      <div class="cutoff-row" id="skipTagsRow" role="group" aria-label="Tags to skip"></div>
+    </details>
+
+    <details class="settings-group" id="sgPicker">
+      <summary class="settings-summary">Category picker</summary>
+      <div class="settings-info">How the category sheet lays out when you tap a card.</div>
+      <div class="cutoff-row" id="pickerRow" role="group" aria-label="Picker style"></div>
+      <p class="settings-info" id="pickerInfo"></p>
+      <button type="button" class="try-btn" id="pickerTry">Try it</button>
+    </details>
+
+    <details class="settings-group" id="sgRules">
+      <summary class="settings-summary">Local rules</summary>
+      <div class="settings-info" id="rulesNote"></div>
+      <div id="rulesList"></div>
+    </details>
+
+    <details class="settings-group" id="sgLook">
+      <summary class="settings-summary">Badge &amp; sound</summary>
+      <label class="toggle-row">
+        <input type="checkbox" id="badgeToggle">
+        <span class="toggle-text">Badge on the app icon
+          <span class="toggle-sub">Shows how many cards were left to sort when you last closed dopo.</span>
+        </span>
+      </label>
+      <label class="toggle-row">
+        <input type="checkbox" id="musicToggle">
+        <span class="toggle-text">Chiptune music
+          <span class="toggle-sub">Keygen-era tracker tunes while you sort — shuffled, a fresh one
+            every visit. The ♪ button up top shows what's playing; your device's
+            media controls (lock screen, headphones) pause and skip it.</span>
+        </span>
+      </label>
+      <label class="toggle-row">
+        <input type="checkbox" id="sfxToggle">
+        <span class="toggle-text">Sound effects
+          <span class="toggle-sub">Bleeps on swipes, thuds on landings, a fanfare at inbox zero.</span>
+        </span>
+      </label>
+    </details>
+
     <div class="field-error" id="settingsError" hidden></div>
     <button class="save-btn" id="settingsSave" type="button">Save</button>
-    <button class="forget-btn" id="forgetBtn" type="button" hidden>Forget tokens on this device</button>
   </div>
 </div>
 
@@ -233,25 +295,45 @@
     </section>
 
     <section class="onboard-step" data-step="tune" hidden>
-      <h2 class="ob-title" id="obTitleTune" tabindex="-1">How far back?</h2>
+      <h2 class="ob-title" id="obTitleTune" tabindex="-1">What to sort?</h2>
       <h3 class="ob-subtitle" id="obCutoffLabel">Include transactions for</h3>
       <div class="cutoff-row" id="obCutoffRow" role="group" aria-labelledby="obCutoffLabel"></div>
+      <h3 class="ob-subtitle" id="obIncludeLabel">Include</h3>
+      <div id="obIncludeRows" role="group" aria-labelledby="obIncludeLabel">
+        <label class="toggle-row ob-toggle">
+          <input type="checkbox" data-include="uncategorized">
+          <span class="toggle-text">Uncategorized</span>
+        </label>
+        <label class="toggle-row ob-toggle">
+          <input type="checkbox" data-include="unreviewed">
+          <span class="toggle-text">Categorized, not reviewed
+            <span class="toggle-sub">Lunch Money already picked one — confirm it with a swipe, or change it.</span>
+          </span>
+        </label>
+        <label class="toggle-row ob-toggle">
+          <input type="checkbox" data-include="reviewed">
+          <span class="toggle-text">Reviewed
+            <span class="toggle-sub">Re-sort what's already done.</span>
+          </span>
+        </label>
+      </div>
+      <h3 class="ob-subtitle" id="obSkipLabel">Skip tagged</h3>
+      <div class="cutoff-row" id="obSkipTagsRow" role="group" aria-labelledby="obSkipLabel"></div>
+      <p class="ob-sub" id="obSkipTagsNote">Transactions carrying any of these tags stay out of the deck.</p>
       <p id="obCount" role="status">Loading your transactions…</p>
-      <p class="ob-sub">Older transactions stay unreviewed in Lunch Money until you widen this — you can
-        change it any time in Settings.</p>
+      <p class="ob-sub">You can change all of this any time in Settings.</p>
     </section>
 
     <section class="onboard-step" data-step="picker" hidden>
       <h2 class="ob-title" id="obTitlePicker" tabindex="-1">How do you want to pick categories?</h2>
-      <p class="ob-lead">Two taps: group, then category.</p>
+      <p class="ob-lead">Tap a style, then try it on the sample below — your own categories, nothing is saved.</p>
       <div class="cutoff-row" id="obPickerRow" role="group" aria-label="Picker style"></div>
-      <p class="settings-info" id="obPickerBlurb" hidden></p>
+      <p class="settings-info ob-picker-blurb" id="obPickerBlurb"></p>
       <div class="ob-picker-panel" id="obPickerPanel">
         <div class="ob-picker-sample" id="obPickerSample"></div>
         <div class="ob-picker-root" id="obPickerRoot"></div>
         <div class="ob-picker-result" id="obPickerResult" aria-live="polite"></div>
       </div>
-      <button type="button" class="try-btn" id="obPickerTry" aria-controls="obPickerPanel">Try it yourself</button>
     </section>
 
     <section class="onboard-step" data-step="done" hidden>

@@ -57,6 +57,8 @@ const winTxn = (id: number) => ({
   manual_account_id: null,
 });
 
+import { defaultScopePrefs, scopeSave } from "../public/lib/store.js";
+
 let mock: MockFetch;
 beforeEach(() => {
   backing.clear();
@@ -334,5 +336,17 @@ describe("replayQueue — lock scope", () => {
       if (orig) Object.defineProperty(globalThis, "navigator", orig);
       else delete (globalThis as Record<string, unknown>).navigator;
     }
+  });
+});
+
+describe("replayQueue — recheck under the stored scope", () => {
+  test("with reviewed rows in scope, a per-id 'reviewed' answer is SAFE (sent), not a skip", async () => {
+    scopeSave({ ...defaultScopePrefs(), include: { uncategorized: true, unreviewed: true, reviewed: true } });
+    queueSave([qi(3, 101)]); // outside the window; per-id says reviewed
+    routeReplay({ window: [], perId: { 3: { category_id: 101, status: "reviewed" } } });
+    const res = await replayQueue("tok");
+    expect(res.applied).toEqual([3]);
+    expect(res.skippedUnsent).toEqual([]);
+    expect(mock.calls.filter((c) => c.method === "PUT").length).toBe(1);
   });
 });

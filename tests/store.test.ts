@@ -25,7 +25,10 @@ import {
   configureCache,
   cutoffLoad,
   cutoffSave,
+  defaultScopePrefs,
   fetchWindow,
+  scopeLoad,
+  scopeSave,
   getTokens,
   huesLoad,
   huesSave,
@@ -613,13 +616,66 @@ describe("deck cutoff — dopo.cutoff.v1", () => {
   test("fetchWindow speaks the getState opts shape", () => {
     cutoffSave("1w");
     const w = fetchWindow();
-    expect(Object.keys(w).sort()).toEqual(["endDate", "startDate"]);
+    expect(Object.keys(w).sort()).toEqual(["endDate", "scope", "startDate"]);
     expect(w.startDate < w.endDate).toBe(true);
   });
 
   test("a failed write throws so callers can switch to eager flush", () => {
     failWrites = true;
     expect(() => cutoffSave("3m")).toThrow();
+  });
+});
+
+describe("deck scope — dopo.scope.v1", () => {
+  test("defaults: uncategorized + categorized-unreviewed in, reviewed out; AI mirrors it; no skip tags", () => {
+    expect(scopeLoad()).toEqual({
+      include: { uncategorized: true, unreviewed: true, reviewed: false },
+      ai: { uncategorized: true, unreviewed: true, reviewed: false },
+      skipTags: [],
+    });
+    expect(scopeLoad()).toEqual(defaultScopePrefs());
+    expect(fetchWindow().scope).toEqual({ include: { uncategorized: true, unreviewed: true, reviewed: false }, skipTagIds: [] });
+  });
+
+  test("round-trips, and fetchWindow carries the include flags + skip tag IDS (names stay behind)", () => {
+    scopeSave({
+      include: { uncategorized: false, unreviewed: true, reviewed: true },
+      ai: { uncategorized: true, unreviewed: false, reviewed: false },
+      skipTags: [{ id: 7, name: "ignore" }, { id: 9, name: "transfer" }],
+    });
+    expect(scopeLoad()).toEqual({
+      include: { uncategorized: false, unreviewed: true, reviewed: true },
+      ai: { uncategorized: true, unreviewed: false, reviewed: false },
+      skipTags: [{ id: 7, name: "ignore" }, { id: 9, name: "transfer" }],
+    });
+    expect(fetchWindow().scope).toEqual({ include: { uncategorized: false, unreviewed: true, reviewed: true }, skipTagIds: [7, 9] });
+    expect(JSON.parse(backing.get(LS_KEYS.scope)!)).toHaveProperty("skipTags");
+  });
+
+  test("corrupt or partial storage degrades FIELD BY FIELD to the defaults", () => {
+    backing.set(LS_KEYS.scope, "{not json");
+    expect(scopeLoad()).toEqual(defaultScopePrefs());
+    backing.set(LS_KEYS.scope, JSON.stringify({ include: { reviewed: true, bogus: true, uncategorized: "yes" }, skipTags: "nope" }));
+    expect(scopeLoad()).toEqual({
+      include: { uncategorized: true, unreviewed: true, reviewed: true },
+      ai: { uncategorized: true, unreviewed: true, reviewed: false },
+      skipTags: [],
+    });
+    backing.set(LS_KEYS.scope, JSON.stringify({ skipTags: [{ id: 1, name: "ok" }, { id: "2", name: "bad id" }, { id: 3 }, null] }));
+    expect(scopeLoad().skipTags).toEqual([{ id: 1, name: "ok" }]);
+  });
+
+  test("a device preference: Forget tokens leaves it alone", () => {
+    setTokens({ lm: "lm-1", or: null });
+    scopeSave({ ...defaultScopePrefs(), skipTags: [{ id: 5, name: "keep me" }] });
+    clearTokens();
+    expect(getTokens().lm).toBeNull();
+    expect(scopeLoad().skipTags).toEqual([{ id: 5, name: "keep me" }]);
+  });
+
+  test("a failed write throws so callers can switch to eager flush", () => {
+    failWrites = true;
+    expect(() => scopeSave(defaultScopePrefs())).toThrow();
   });
 });
 

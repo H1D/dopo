@@ -5,10 +5,11 @@
  * scheduling, suggestion cache reads/writes. Import-safe without a DOM.
  */
 
-import { getState } from "./lib/lm.js";
+import { getState, bucketOf } from "./lib/lm.js";
 import { classifyTransactions, webCheckMerchant } from "./lib/classify.js";
 import { matchRule, ruleSuggestion } from "./lib/rules.js";
 import { cleanMerchant } from "./lib/clean.js";
+import { CONFIDENT_AT } from "./lib/card.js";
 import { snapshotLoad, snapshotSave, sugGetMany, sugPut, isSuggestion, fetchWindow } from "./lib/store.js";
 
 /**
@@ -23,7 +24,12 @@ import { snapshotLoad, snapshotSave, sugGetMany, sugPut, isSuggestion, fetchWind
  * @property {string} [created_at]
  */
 
-/** @typedef {import("./lib/lm.js").LMTransaction & {merchant: string, suggestion: UISuggestion|null}} DeckTxn */
+/**
+ * @typedef {import("./lib/lm.js").LMTransaction & {merchant: string, suggestion: UISuggestion|null, aiChecked?: boolean}} DeckTxn
+ *   aiChecked: a pass-1 / web verdict exists for this row (cached or fresh) — the
+ *   model is never asked twice for one row in a session, even when its verdict
+ *   lost to the category Lunch Money already holds (see mergeAi).
+ */
 /** @typedef {import("./lib/lm.js").LMAccount} Account */
 /** @typedef {import("./lib/lm.js").LeafCategory} Category */
 /** @typedef {import("./lib/rules.js").Rule} Rule */
@@ -76,6 +82,7 @@ export async function assembleState(token, rules) {
     ...t,
     merchant: cleanMerchant(t.payee || ""),
     suggestion: null,
+    aiChecked: false,
   }));
   await attachSuggestions(txns, rules, raw.categories);
   return {
@@ -103,6 +110,7 @@ export async function assembleFromSnapshot(rules) {
     ...t,
     merchant: cleanMerchant(t.payee || ""),
     suggestion: null,
+    aiChecked: false,
   }));
   await attachSuggestions(txns, rules, snap.categories);
   return {
@@ -121,7 +129,10 @@ export async function assembleFromSnapshot(rules) {
  * A category Lunch Money already holds (its own rules, the bank feed) comes right
  * after local rules, as a confident confirm-or-change suggestion — but only when
  * it is one of the assignable leaves we know, so a swipe never re-applies an
- * archived or group id. With no `categories` given, any id is trusted.
+ * archived or group id. With no `categories` given, any id is trusted. A cached
+ * model verdict on such a row is weighed against it (mergeAi) rather than
+ * ignored: the point of asking the model about a pre-categorized row is a second
+ * opinion.
  * Cache keys: `txn:<id>` (pass 1), `m:<merchant key>` (pass 2 / web).
  * @param {DeckTxn[]} txns
  * @param {Rule[]} rules
@@ -130,6 +141,8 @@ export async function assembleFromSnapshot(rules) {
  */
 export async function attachSuggestions(txns, rules, categories) {
   const leafIds = categories ? new Set(categories.map((c) => c.id)) : null;
+  /** @param {number} id */
+  const isLeaf = (id) => !leafIds || leafIds.has(id);
   /** @type {Map<string, unknown>} */
   let cache = new Map();
   try {
@@ -151,18 +164,16 @@ export async function attachSuggestions(txns, rules, categories) {
       };
       continue;
     }
-    if (t.category_id != null && (!leafIds || leafIds.has(t.category_id))) {
-      t.suggestion = lmSuggestion(t.category_id);
-      continue;
-    }
+    if (t.category_id != null && isLeaf(t.category_id)) t.suggestion = lmSuggestion(t.category_id);
     const mk = merchantKeyOf(t.merchant);
     const web = mk ? cache.get("m:" + mk) : undefined;
-    if (isSuggestion(web) && web.suggested_category_id != null) {
-      t.suggestion = fromCache(web, "web");
-      continue;
-    }
     const ai = cache.get("txn:" + t.id);
-    if (isSuggestion(ai)) t.suggestion = fromCache(ai, "ai");
+    // web beats pass 1 (mergeAi keeps a web verdict over an ai one), so apply ai first
+    if (isSuggestion(ai)) { t.aiChecked = true; t.suggestion = mergeAi(t, fromCache(ai, "ai"), isLeaf); }
+    if (isSuggestion(web) && web.suggested_category_id != null) {
+      t.aiChecked = true;
+      t.suggestion = mergeAi(t, fromCache(web, "web"), isLeaf);
+    }
   }
 }
 
@@ -170,15 +181,68 @@ export async function attachSuggestions(txns, rules, categories) {
  * The category Lunch Money already holds, as a card suggestion. Confidence 1 so
  * a right swipe confirms it (PUT with the same id + status "reviewed").
  * @param {number} categoryId
+ * @param {"agrees"|"unsure"} [verdict]  what the model made of it, when asked
  * @returns {UISuggestion}
  */
-function lmSuggestion(categoryId) {
-  return {
-    suggested_category_id: categoryId,
-    confidence: 1,
-    reasoning: "already categorized in Lunch Money — swipe right to confirm, or pick another",
-    source: "lm",
-  };
+function lmSuggestion(categoryId, verdict) {
+  const reasoning = verdict === "agrees"
+    ? "already categorized in Lunch Money, and AI agrees — swipe right to confirm"
+    : verdict === "unsure"
+      ? "already categorized in Lunch Money; AI wasn't sure either — swipe right to keep it, or pick another"
+      : "already categorized in Lunch Money — swipe right to confirm, or pick another";
+  return { suggested_category_id: categoryId, confidence: 1, reasoning, source: "lm" };
+}
+
+/**
+ * Fold a fresh model verdict (pass 1 or web) into a row. Pure: returns the
+ * suggestion the row should hold, never mutates.
+ *   - a local rule stays on top, always;
+ *   - a web verdict is final: a later pass-1 result never replaces it;
+ *   - on a row Lunch Money already categorized (a trusted leaf), the model is a
+ *     second opinion: it only takes the card when it is CONFIDENT and DISAGREES.
+ *     Agreement or an unsure verdict keeps the held category, with the reasoning
+ *     saying which — the swipe-right confirm stays a one-move card.
+ * @param {DeckTxn} t
+ * @param {UISuggestion} next  source "ai" | "web"
+ * @param {(id: number) => boolean} [isLeaf]  trust test for t.category_id (default: trust)
+ * @returns {UISuggestion}
+ */
+export function mergeAi(t, next, isLeaf = () => true) {
+  const cur = t.suggestion;
+  if (cur?.source === "rule") return cur;
+  if (cur?.source === "web" && next.source === "ai") return cur;
+  const held = t.category_id != null && isLeaf(t.category_id) ? t.category_id : null;
+  if (held !== null) {
+    if (next.suggested_category_id === held) return lmSuggestion(held, "agrees");
+    if (next.suggested_category_id == null || (next.confidence ?? 0) < CONFIDENT_AT) return lmSuggestion(held, "unsure");
+  }
+  return next;
+}
+
+/**
+ * Whether pass 1 should be run on this row unasked: its bucket is switched on
+ * for automatic AI, and the model hasn't spoken yet — a bare card, or one still
+ * showing only the category Lunch Money holds.
+ * @param {DeckTxn} t
+ * @param {Record<import("./lib/lm.js").Bucket, boolean>} ai  the "automatically ask AI about" flags
+ * @returns {boolean}
+ */
+export function wantsAi(t, ai) {
+  if (!ai[bucketOf(t)]) return false;
+  return askable(t);
+}
+
+/**
+ * Whether the model could still add something to this row: no verdict yet, and
+ * nothing but a bare card or Lunch Money's own category on it. Rule matches and
+ * existing verdicts are final.
+ * @param {DeckTxn} t
+ * @returns {boolean}
+ */
+export function askable(t) {
+  if (t.aiChecked) return false;
+  const s = t.suggestion;
+  return !s || s.source === "lm";
 }
 
 /**

@@ -127,6 +127,8 @@ export function fmtTxnDate(date, now = new Date()) {
  * @property {CardSuggestion|null} [suggestion]
  */
 
+/** @typedef {"idle"|"busy"|null} AskAi  null = no button; "busy" = the model is being asked now */
+
 /**
  * Confident = rule match, or model/web confidence at/above threshold.
  * @param {CardTxn} t
@@ -144,10 +146,13 @@ export function isConfident(t, confidentAt = CONFIDENT_AT) {
  * @param {object} [opts]
  * @param {{name: string, group?: string|null}|null} [opts.category]  resolved suggested category
  * @param {{name: string, mask?: string|null}|null} [opts.account]  resolved account
+ * @param {{name: string, group?: string|null}|null} [opts.held]  the category Lunch Money holds
+ *   on this row, shown as a footnote when the card suggests something else
+ * @param {AskAi} [opts.askAi]  render the "Ask AI" button (pre-categorized / bare rows the model hasn't seen)
  * @param {number} [opts.confidentAt]
  * @returns {string}
  */
-export function cardHTML(txn, { category = null, account = null, confidentAt = CONFIDENT_AT } = {}) {
+export function cardHTML(txn, { category = null, account = null, held = null, askAi = null, confidentAt = CONFIDENT_AT } = {}) {
   const t = txn;
   const s = t.suggestion;
   const cat = s && s.suggested_category_id != null ? category : null;
@@ -160,13 +165,18 @@ export function cardHTML(txn, { category = null, account = null, confidentAt = C
 
   // Pre-escaped fragments (*Html) — the esc() CI tripwire allows only these,
   // esc(...)/Number(...) calls, and literals inside HTML template lines.
+  // a model verdict on a row Lunch Money already categorized only reaches the card
+  // when it disagrees (data.js mergeAi) — say so, it is the whole point of the card
+  const heldShown = !!held && !!s && s.source !== "rule" && s.source !== "lm";
   const badgeHtml = s?.source === "rule"
     ? '<span class="card-badge rule-badge">rule match</span>'
     : s?.source === "lm"
       ? '<span class="card-badge lm-badge">already categorized</span>'
-      : s?.source === "web"
-        ? '<span class="card-badge web-badge">🌐 web-checked</span>'
-        : unsure ? '<span class="card-badge unsure-badge">unsure</span>' : "";
+      : heldShown && confident
+        ? '<span class="card-badge disagree-badge">AI disagrees</span>'
+        : s?.source === "web"
+          ? '<span class="card-badge web-badge">🌐 web-checked</span>'
+          : unsure ? '<span class="card-badge unsure-badge">unsure</span>' : "";
   const heroHtml = esc(catBits?.emoji || (cat ? "🧾" : "❓"));
   const chipHtml = cat && catBits ? esc(catBits.text) : "tap to pick a category";
   const groupHtml = cat?.group ? `<div class="cat-group">${esc(cat.group)}</div>` : "";
@@ -175,6 +185,15 @@ export function cardHTML(txn, { category = null, account = null, confidentAt = C
     ? ` · 💳 ${esc(account.name)}${account.mask ? " ··" + esc(account.mask) : ""}`
     : "";
   const evidenceHtml = s?.lookup ? `<div class="evidence">🔎 ${esc(s.lookup)}</div>` : "";
+  const heldBits = held ? splitEmoji(held.name) : null;
+  const heldHtml = heldShown && heldBits
+    ? `<div class="held-line">Lunch Money has: ${esc(heldBits.emoji ? heldBits.emoji + " " : "")}${esc(heldBits.text)}</div>`
+    : "";
+  const askHtml = askAi === "busy"
+    ? '<button class="ask-ai" type="button" disabled aria-busy="true">✨ Asking AI…</button>'
+    : askAi === "idle"
+      ? '<button class="ask-ai" type="button">✨ Ask AI</button>'
+      : "";
   const lookupRowHtml = s?.lookup ? `<div><b>lookup:</b> ${esc(s.lookup)}</div>` : "";
   const notesRowHtml = t.notes ? `<div><b>notes:</b> ${esc(t.notes)}</div>` : "";
   const stampHtml = confident ? "SORTED ✓" : "CHOOSE";
@@ -198,7 +217,9 @@ export function cardHTML(txn, { category = null, account = null, confidentAt = C
       <div class="amount ${esc(a.dir)}">${esc(a.sign)}${esc(a.abs)}<span class="cur">${esc(a.cur)}</span></div>
       <div class="txn-date">${esc(fmtTxnDate(t.date))}${acctHtml}</div>
       <div class="reason">${esc(s?.reasoning || "not classified yet")}</div>
+      ${heldHtml}
       ${evidenceHtml}
+      ${askHtml}
       <button class="details-toggle" type="button">ⓘ details</button>
       <div class="details">
         <div><b>raw:</b> ${esc(t.payee || "—")}</div>

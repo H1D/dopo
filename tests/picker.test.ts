@@ -9,6 +9,7 @@ import {
   MAX_LEVEL,
   PICKER_IDS,
   PICKER_META,
+  R_FULL,
   assignHues,
   buildTree,
   findNode,
@@ -544,11 +545,38 @@ describe("wheelGeometry", () => {
     expect(geom.inner.length).toBe(6);
     expect(geom.outer.length).toBe(0);
     expect(geom.R0).toBe(20);
-    expect(geom.R1).toBe(56);
     expect(geom.R2).toBe(98);
     expect(geom.inner[0]?.a).toBeCloseTo(-Math.PI / 2, 10);
     for (const w of geom.inner) expect(w.w).toBeCloseTo((2 * Math.PI) / 6, 10);
     expect(geom.inner.map((w) => w.key)).toEqual(tree.map((n) => n.key));
+  });
+
+  test("at rest the whole disc is the inner ring", () => {
+    const tree = mixedTree(6, 4);
+    const rest = wheelGeometry(tree, null);
+    expect(rest.R1).toBe(R_FULL);
+    expect(rest.R1).toBe(98);
+    expect(rest.innerScale).toBe(1);
+    expect(rest.outer).toEqual([]);
+    // a finger far out, where the fan would be, is still on a top-level wedge
+    const w = rest.inner[2] as { key: string; a: number };
+    expect(wheelHit(rest, 77, w.a)).toEqual({ key: w.key });
+    expect(wheelHit(rest, 97, w.a)).toEqual({ key: w.key });
+  });
+
+  test("open: the inner ring's hit band ends at 56, the fan takes 58..98, and CSS shrinks the ring by 56/98", () => {
+    const tree = mixedTree(6, 4);
+    const group = tree.find(isGroup) as PGroup;
+    const open = wheelGeometry(tree, group);
+    expect(open.R0).toBe(20);
+    expect(open.R1).toBe(56);
+    expect(open.R2).toBe(98);
+    expect(open.innerScale).toBeCloseTo(56 / 98, 12);
+    const parent = open.inner.find((w) => w.key === group.key) as { key: string; a: number };
+    expect(wheelHit(open, 55, parent.a)).toEqual({ key: group.key });
+    const outerKeys = open.outer.map((w) => w.key);
+    expect(outerKeys).toContain((wheelHit(open, 58, parent.a) as { key: string }).key);
+    expect(outerKeys).toContain((wheelHit(open, 98, parent.a) as { key: string }).key);
   });
 
   test("children fan around the parent, width capped at 0.85 rad", () => {
@@ -609,7 +637,68 @@ describe("wheelHit", () => {
     const away = (geom.outer[0]?.a ?? 0) + Math.PI;
     expect(wheelHit(geom, 77, away)).toBeNull();
     expect(wheelHit(geom, 140, 0)).toBeNull();
-    expect(wheelHit(wheelGeometry(tree, null), 77, 0)).toBeNull();
+  });
+
+  test("at rest there is no fan band: r = 77 is an inner wedge, not a miss", () => {
+    const rest = wheelGeometry(tree, null);
+    const hit = wheelHit(rest, 77, 0);
+    expect(hit).not.toBeNull();
+    expect(rest.inner.map((w) => w.key)).toContain((hit as { key: string }).key);
+  });
+
+  describe("hysteresis via `keep`", () => {
+    const a = geom.outer[0] as { key: string; a: number; w: number };
+    const b = geom.outer[1] as { key: string; a: number; w: number };
+    const edge = a.a + a.w / 2;   // the seam between children A and B
+
+    test("the hovered child holds the hit a little past its edge", () => {
+      expect(wheelHit(geom, 77, edge + 0.04, a.key)).toEqual({ key: a.key });
+      expect(wheelHit(geom, 77, edge + 0.08, a.key)).toEqual({ key: b.key });
+    });
+
+    test("without keep the nearest wedge wins, as before", () => {
+      expect(wheelHit(geom, 77, edge + 0.04)).toEqual({ key: b.key });
+      expect(wheelHit(geom, 77, edge + 0.04, null)).toEqual({ key: b.key });
+      expect(wheelHit(geom, 77, edge - 0.04, b.key)).toEqual({ key: b.key });
+    });
+
+    test("keep naming a wedge in the OTHER ring has no effect", () => {
+      // a hovered inner wedge cannot hold the hit once the finger is in the fan
+      expect(wheelHit(geom, 77, edge + 0.04, group.key)).toEqual({ key: b.key });
+      // and a hovered child cannot hold it in the inner band
+      const inner = geom.inner[1] as { key: string; a: number; w: number };
+      const innerEdge = inner.a + inner.w / 2;
+      expect(wheelHit(geom, 38, innerEdge + 0.04, a.key)).toEqual({ key: geom.inner[2]?.key ?? "" });
+    });
+
+    test("keep never revives a wedge the finger has clearly left", () => {
+      expect(wheelHit(geom, 77, a.a + Math.PI, a.key)).toBeNull();
+      expect(wheelHit(geom, 140, a.a, a.key)).toBeNull();
+    });
+  });
+});
+
+describe("renderWheel", () => {
+  const tree = mixedTree(6, 4);
+  const group = tree.find(isGroup) as PGroup;
+
+  test("the svg carries pk-open only while a group is open", () => {
+    const rest = renderWheel(view(tree));
+    const open = renderWheel(view(tree, { group }));
+    expect(rest).toMatch(/<svg viewBox=/);
+    expect(rest).not.toContain('class="pk-open"');
+    expect(open).toMatch(/<svg class="pk-open" viewBox=/);
+  });
+
+  test("the inner ring is drawn full size whether or not a group is open", () => {
+    const innerOf = (html: string) => html.match(/<g class="pk-inner">(.*?)<\/g>/)?.[1] ?? "";
+    const restInner = innerOf(renderWheel(view(tree)));
+    const openInner = innerOf(renderWheel(view(tree, { group })));
+    const paths = (s: string) => Array.from(s.matchAll(/ d="([^"]+)"/g), (m) => m[1]);
+    expect(paths(restInner).length).toBe(6);
+    expect(paths(restInner)).toEqual(paths(openInner));
+    // the ring's outer arc is at R_FULL, not at the open level's R1
+    expect(restInner).toContain(`A${R_FULL},${R_FULL}`);
   });
 });
 
