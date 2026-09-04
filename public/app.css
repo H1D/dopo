@@ -1592,6 +1592,9 @@ body.pick-fast-open .sheet-backdrop,
 .pk-dock-sub .pk-emoji { font-size: 20px; }
 .pk-dock-sub .pk-emoji.pk-mono { font-size: 14px; }
 .pk-dock-sub .pk-name { text-align: left; font-size: 12px; }
+/* long names in the dock sub-row: one line with an ellipsis, clear of the hotkey badge */
+.pk-dock-sub .pk-name { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; -webkit-line-clamp: unset; }
+.pk-dock-sub .pk-tile { padding-right: 20px; }
 
 .pk-dock-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .pk-dock-row .pk-tile {
