@@ -9,8 +9,8 @@
  * `done` so the gesture legend on `done` can describe the picker the user chose.
  */
 
-/** @typedef {"welcome"|"lm"|"or"|"picker"|"done"} StepId */
-export const STEP_IDS = /** @type {const} */ (["welcome", "lm", "or", "picker", "done"]);
+/** @typedef {"welcome"|"lm"|"or"|"tune"|"picker"|"done"} StepId */
+export const STEP_IDS = /** @type {const} */ (["welcome", "lm", "or", "tune", "picker", "done"]);
 
 /**
  * @param {unknown} v
@@ -34,7 +34,7 @@ export function parseStep(v) {
  */
 export function stepsFor(o) {
   if (o.returning) return o.hasFreeTier ? ["lm", "or"] : ["lm"];
-  return ["welcome", "lm", "or", "picker", "done"];
+  return ["welcome", "lm", "or", "tune", "picker", "done"];
 }
 
 /**
@@ -153,7 +153,8 @@ export function canAdvance(a) {
     return { canContinue: true, primary, secondary: null, showBack, checkFirst: false };
   }
 
-  if (stepId === "done") {
+  if (stepId === "tune" || stepId === "done") {
+    // tune: period + sound, all optional with sane defaults; done: the gesture legend.
     return { canContinue: true, primary, secondary: null, showBack, checkFirst: false };
   }
 
@@ -184,7 +185,18 @@ export function canAdvance(a) {
  */
 export function orChoices(hasFreeTier) {
   /** @type {{id:"free"|"none"|"own", title:string, lead:string, bullets:string[]}[]} */
-  const out = [];
+  const out = [
+    {
+      // first and recommended: the best model, web checks, and your own data policy
+      id: "own",
+      title: "My own OpenRouter key",
+      lead: "Best results — about 3 minutes to set up.",
+      bullets: [
+        "Sign up at openrouter.ai, add a few dollars of credit, and create a dedicated key with a spend limit — dopo shows the exact steps.",
+        "About $0.06 per 500 transactions, plus $0.0075 each time it double-checks a merchant on the web (max 15 per session).",
+      ],
+    },
+  ];
   if (hasFreeTier) {
     out.push({
       id: "free",
@@ -206,14 +218,5 @@ export function orChoices(hasFreeTier) {
       bullets: [],
     });
   }
-  out.push({
-    id: "own",
-    title: "My own key",
-    lead: "",
-    bullets: [
-      "About $0.06 per 500 transactions, plus $0.0075 each time it double-checks a merchant on the web (max 15 per session).",
-      "Use a dedicated key with a spend limit.",
-    ],
-  });
   return out;
 }

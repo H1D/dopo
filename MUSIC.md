@@ -8,9 +8,11 @@ written by scene musicians, played in the browser with
 
 ## Attribution
 
-Every track is the work of its author. dopo displays "Title — Author" in the
-♪ mini-player whenever a track plays, and the full catalog with per-track
-source links lives in [`music/manifest.json`](music/manifest.json). The track
+Every track is the work of its author. dopo displays "Title — by Author" in
+the ♪ mini-player whenever a track plays, with a link to the page the track
+was taken from (its `source_url`, currently The Mod Archive for every track).
+The full catalog with per-track source links lives in
+[`music/manifest.json`](music/manifest.json). The track
 files themselves are not part of this repository; they are served from a
 separate music host (`dopo-music.artems.net`, marked `noindex`).
 

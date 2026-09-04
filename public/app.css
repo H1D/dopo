@@ -209,6 +209,8 @@ header.top {
   font-size: 12px;
   color: var(--muted);
 }
+.music-source { color: var(--accent); text-decoration: none; }
+.music-source::after { content: " ↗"; }
 .music-controls {
   display: flex;
   gap: 6px;
@@ -1121,17 +1123,10 @@ dialog.onboard:not([open]) { display: none; }
   padding: 2px 6px;
 }
 
-.ob-cutoff-change {
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px; /* same tap target as every other control in the dialog */
-  color: var(--accent);
-  font-weight: 700;
-  font-size: 13px;
-  padding: 0 8px;
-  margin: -8px 0 4px;
-}
-.ob-cutoff-line { padding: 6px 8px 0; }
+.ob-subtitle { font-size: 15px; font-weight: 800; margin: 14px 0 4px; }
+.ob-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.onboard-step .toggle-row { padding: 6px 0; } /* tighter than Settings: the legend shares the screen */
+.onboard-step .ob-gestures { margin-bottom: 8px; }
 
 .onboard-footer {
   display: flex;
@@ -1740,4 +1735,16 @@ g.pk-outer.pk-swap { animation: pk-fade-in .12s ease-out; }
   .sheet.pick-wheel .sheet-body { height: min(74dvh, 62vw); }
   .pk-emoji { font-size: clamp(16px, 5vmin, 26px); }
   .pk-dock-sub .pk-tile { min-height: 40px; }
+}
+
+/* "Try it" buttons in the wizard picker step and in Settings */
+.ob-try { /* small in-dialog secondary action (Try it) */
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px; /* same tap target as every other control in the dialog */
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 13px;
+  padding: 0 8px;
+  margin: -8px 0 4px;
 }

@@ -185,17 +185,20 @@ source of truth for transaction data; the device is the source of truth for pend
   tree because a snapshot boot legitimately sees a subset of it. Like `dopo.picker.v1`, it is a
   device preference and **survives "Forget tokens"**.
 - **Onboarding wizard** (`#onboard`, a `<dialog>` in the top layer; replaces the old onboarding
-  card): 5 steps — welcome (what dopo does, the privacy line, an offline note) → lm (paste the LM
-  token, live-validated) → or (a real radio group: `free` when a shared key is configured, else
-  `none`; `own` reveals a key field) → picker (choose the category picker: five chips from
-  `PICKER_META`, a one-line blurb, and a "Try it" button that swaps the step body for a live
-  in-place demo — no nested dialog; the choice persists on selection and `canAdvance` always
-  permits Continue) → done (gesture legend, live uncategorized count, cutoff chips). Shown iff
-  `!tokens.lm || cursor`; resumes at the persisted step, never at `welcome` once a token exists.
-  Returning users (Forget tokens) skip to `["lm","or"]` when a shared free tier exists, else
-  `["lm"]` alone — never silently defaulting a returning own-key user onto the shared key, and
-  never re-asking for the picker (that preference already exists and outlives Forget tokens).
-  The last step's primary button reads "Done" on the returning path, "Start sorting" on a first run.
+  card): 6 steps — welcome (what dopo does, the privacy line, an offline note) → lm (paste the LM
+  token, live-validated) → or (a real radio group, `own` first: `free` when a shared key is
+  configured, else `none`; `own` reveals a key field and a 3-step how-to) → tune ("How far back?":
+  cutoff chips always expanded as "Include transactions for" plus the live uncategorized count) →
+  picker (choose the category picker: five chips from `PICKER_META`, a one-line blurb, and a
+  "Try it" button that swaps the step body for a live in-place demo — no nested dialog; the choice
+  persists on selection and `canAdvance` always permits Continue) → done (gesture legend and the
+  music/SFX toggles, which share the `setMusicPref`/`setSfxPref` setters with Settings and are
+  repainted from `audioPrefs` on entry). Split so each step fits an iPhone SE without scrolling.
+  Shown iff `!tokens.lm || cursor`; resumes at the persisted step, never at `welcome` once a token
+  exists. Returning users (Forget tokens) skip to `["lm","or"]` when a shared free tier exists, else
+  `["lm"]` alone — never silently defaulting a returning own-key user onto the shared key, and never
+  re-asking for the picker (that preference already exists and outlives Forget tokens). The last
+  step's primary button reads "Done" on the returning path, "Start sorting" on a first run.
   - **Resume cursor** `dopo.onboard.v1` holds the current step id, written on every step change and
     removed on finish or Forget tokens. Invariant: the wizard is showing iff `!tokens.lm || cursor`.
   - **Containment**: while the wizard is open (`onboardingActive`) it owns the top layer alone —
