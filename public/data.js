@@ -16,9 +16,9 @@ import { snapshotLoad, snapshotSave, sugGetMany, sugPut, isSuggestion, fetchWind
  * rendered: suggested_category_id + confidence + reasoning + source).
  * @typedef {object} UISuggestion
  * @property {number|null} suggested_category_id
- * @property {number|null} confidence  rules use 1
+ * @property {number|null} confidence  rules and existing LM categories use 1
  * @property {string} reasoning
- * @property {"rule"|"ai"|"web"} source
+ * @property {"rule"|"lm"|"ai"|"web"} source  "lm" = the category Lunch Money already holds (confirm or change)
  * @property {string} [lookup]
  * @property {string} [created_at]
  */
@@ -55,9 +55,10 @@ function fromCache(c, source) {
 }
 
 /**
- * Fetch + decorate the full app state: leaf categories, accounts, uncategorized
+ * Fetch + decorate the full app state: leaf categories, accounts, unreviewed
  * txns with cleaned merchant names and their best known suggestion attached
- * (rules first, then cached web-check per merchant, then cached pass-1 per txn).
+ * (rules first, then the category Lunch Money already holds, then cached
+ * web-check per merchant, then cached pass-1 per txn).
  *
  * @param {string} token  Lunch Money token
  * @param {Rule[]} rules  local rules (lib/store.js rulesLoad())
@@ -76,7 +77,7 @@ export async function assembleState(token, rules) {
     merchant: cleanMerchant(t.payee || ""),
     suggestion: null,
   }));
-  await attachSuggestions(txns, rules);
+  await attachSuggestions(txns, rules, raw.categories);
   return {
     categories: raw.categories,
     accounts: raw.accounts,
@@ -88,7 +89,7 @@ export async function assembleState(token, rules) {
 
 /**
  * Offline boot path: rebuild the deck from the last saved snapshot, decorated in
- * the SAME order as the live path (rules → cached web → cached ai). The caller
+ * the SAME order as the live path (rules → LM category → cached web → cached ai). The caller
  * renders it with a stale banner; `fetchedAt` feeds the relative age.
  * @param {Rule[]} rules
  * @returns {Promise<{categories: Category[], accounts: Account[], transactions: DeckTxn[], truncated: boolean, total: number|null, stale: true, fetchedAt: number}|null>}
@@ -103,7 +104,7 @@ export async function assembleFromSnapshot(rules) {
     merchant: cleanMerchant(t.payee || ""),
     suggestion: null,
   }));
-  await attachSuggestions(txns, rules);
+  await attachSuggestions(txns, rules, snap.categories);
   return {
     categories: snap.categories,
     accounts: snap.accounts,
@@ -117,12 +118,18 @@ export async function assembleFromSnapshot(rules) {
 
 /**
  * Rules-first attach; cache reads are a bonus — failures leave suggestion null.
+ * A category Lunch Money already holds (its own rules, the bank feed) comes right
+ * after local rules, as a confident confirm-or-change suggestion — but only when
+ * it is one of the assignable leaves we know, so a swipe never re-applies an
+ * archived or group id. With no `categories` given, any id is trusted.
  * Cache keys: `txn:<id>` (pass 1), `m:<merchant key>` (pass 2 / web).
  * @param {DeckTxn[]} txns
  * @param {Rule[]} rules
+ * @param {Pick<Category, "id">[]} [categories]  assignable leaves (lm.js leafCategories)
  * @returns {Promise<void>}
  */
-export async function attachSuggestions(txns, rules) {
+export async function attachSuggestions(txns, rules, categories) {
+  const leafIds = categories ? new Set(categories.map((c) => c.id)) : null;
   /** @type {Map<string, unknown>} */
   let cache = new Map();
   try {
@@ -144,6 +151,10 @@ export async function attachSuggestions(txns, rules) {
       };
       continue;
     }
+    if (t.category_id != null && (!leafIds || leafIds.has(t.category_id))) {
+      t.suggestion = lmSuggestion(t.category_id);
+      continue;
+    }
     const mk = merchantKeyOf(t.merchant);
     const web = mk ? cache.get("m:" + mk) : undefined;
     if (isSuggestion(web) && web.suggested_category_id != null) {
@@ -153,6 +164,21 @@ export async function attachSuggestions(txns, rules) {
     const ai = cache.get("txn:" + t.id);
     if (isSuggestion(ai)) t.suggestion = fromCache(ai, "ai");
   }
+}
+
+/**
+ * The category Lunch Money already holds, as a card suggestion. Confidence 1 so
+ * a right swipe confirms it (PUT with the same id + status "reviewed").
+ * @param {number} categoryId
+ * @returns {UISuggestion}
+ */
+function lmSuggestion(categoryId) {
+  return {
+    suggested_category_id: categoryId,
+    confidence: 1,
+    reasoning: "already categorized in Lunch Money — swipe right to confirm, or pick another",
+    source: "lm",
+  };
 }
 
 /**

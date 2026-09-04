@@ -73,6 +73,36 @@ describe("assembleState — snapshot persistence", () => {
   });
 });
 
+describe("attach order — an LM-held category", () => {
+  test("rides along as a confident 'lm' suggestion; local rules beat it; unknown ids fall through to caches", async () => {
+    await snapshotSave(
+      {
+        categories: [{ id: 101, name: "Groceries", group: null }, { id: 102, name: "Car", group: null }],
+        accounts: [],
+        transactions: [
+          { ...rawTxn(1, "Ayvens"), category_id: 102 }, // LM rule set Car, still unreviewed
+          { ...rawTxn(2, "Albert Heijn 1234"), category_id: 102 }, // a local rule disagrees
+          { ...rawTxn(3, "Old Shop"), category_id: 999 }, // archived / unknown category -> not trusted
+          rawTxn(4, "Nothing Known"),
+        ],
+        truncated: false,
+        total: 4,
+      },
+      1,
+    );
+    await sugPut("txn:3", { suggested_category_id: 101, confidence: 0.4, reasoning: "ai says" });
+    mock = new MockFetch().install();
+    const res = await assembleFromSnapshot([
+      { id: 1, pattern: "albert heijn", match_type: "contains", category_id: 101 },
+    ]);
+    const byId = new Map(res!.transactions.map((t) => [t.id, t]));
+    expect(byId.get(1)!.suggestion).toMatchObject({ source: "lm", suggested_category_id: 102, confidence: 1 });
+    expect(byId.get(2)!.suggestion).toMatchObject({ source: "rule", suggested_category_id: 101 });
+    expect(byId.get(3)!.suggestion).toMatchObject({ source: "ai", suggested_category_id: 101 });
+    expect(byId.get(4)!.suggestion).toBeNull();
+  });
+});
+
 describe("assembleFromSnapshot — offline boot assembly", () => {
   test("null when no snapshot exists", async () => {
     mock = new MockFetch().install();

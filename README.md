@@ -31,7 +31,7 @@ one and lets you try it there; you can switch any time under **Settings → Cate
   the maintainer's OpenRouter account. Your browser still talks to `openrouter.ai` directly — nothing passes through
   the host — but that account's activity log sees the usual request metadata (model, token counts,
   timestamps), and OpenRouter's free endpoints may log or train on prompts, which for pass 1 means
-  payee strings, amounts, dates and notes of your uncategorized transactions. Your own key ends
+  payee strings, amounts, dates and notes of your unreviewed transactions. Your own key ends
   that: you pick the data policy, nobody else sees the usage.
 - The host still sees ordinary web metadata (your IP, user agent, when you loaded the page). That is
   true of any website.
@@ -105,7 +105,7 @@ dopo works without a connection. The app shell is cached by the service worker, 
 from the last fetched snapshot (with a banner showing its age), and every swipe is saved on the
 device the moment you make it — then synced to Lunch Money when you're back online. An
 "Offline · N queued" chip shows what's waiting; before anything queued is written upstream, dopo
-re-checks that each transaction is still uncategorized, so a decision made offline never
+re-checks that each transaction is still unreviewed, so a decision made offline never
 overwrites categorization done elsewhere in the meantime. AI suggestions need the network and
 pause while offline; sorting by hand keeps working.
 

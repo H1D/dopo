@@ -80,9 +80,9 @@ export class LMError extends Error {
  * @property {LeafCategory[]} categories  flat assignable leaves with group attached —
  *   the same shape the old /api/state served, which the UI renders directly
  * @property {LMAccount[]} accounts
- * @property {LMTransaction[]} transactions  uncategorized, non-pending
+ * @property {LMTransaction[]} transactions  unreviewed, non-pending (see isOpen)
  * @property {boolean} truncated  true when the 5-page ceiling was hit with more pages behind it
- * @property {number|null} total  total uncategorized count when known (API-reported when
+ * @property {number|null} total  total unreviewed count when known (API-reported when
  *   truncated; equals transactions.length otherwise; null when the API gives no total)
  */
 
@@ -223,7 +223,19 @@ export function defaultRange() {
 }
 
 /**
- * One paged sweep of uncategorized, non-pending transactions in the range.
+ * Deck membership: a transaction is "open" (still dopo's to sort) until Lunch
+ * Money marks it reviewed. Already-categorized rows (LM rules, bank feeds) stay
+ * in — the existing category rides along as a confirm-or-change suggestion.
+ * Pending rows are skipped: their payee/amount can still change.
+ * @param {Partial<LMTransaction>|null|undefined} t
+ * @returns {boolean}
+ */
+export function isOpen(t) {
+  return !!t && t.status !== "reviewed" && !t.is_pending;
+}
+
+/**
+ * One paged sweep of unreviewed, non-pending transactions in the range.
  * Pages until `has_more` is false, HARD CEILING `maxPages`.
  * @param {string} token
  * @param {string} start
@@ -231,7 +243,7 @@ export function defaultRange() {
  * @param {number} maxPages
  * @returns {Promise<{transactions: LMTransaction[], truncated: boolean, total: number|null}>}
  */
-async function fetchUncategorized(token, start, end, maxPages) {
+async function fetchUnreviewed(token, start, end, maxPages) {
   /** @type {LMTransaction[]} */
   const out = [];
   let offset = 0;
@@ -249,7 +261,7 @@ async function fetchUncategorized(token, start, end, maxPages) {
       `/transactions?start_date=${start}&end_date=${end}&limit=${PAGE_LIMIT}&offset=${offset}`,
     );
     const txns = Array.isArray(page.transactions) ? page.transactions : [];
-    out.push(...txns.filter((t) => t && t.category_id === null && !t.is_pending));
+    out.push(...txns.filter(isOpen));
     if (typeof page.total === "number") apiTotal = page.total;
     if (!page.has_more) break;
     offset += txns.length;
@@ -288,7 +300,7 @@ export async function getAccounts(token) {
 }
 
 /**
- * Categories + accounts + uncategorized transactions in one call.
+ * Categories + accounts + unreviewed transactions in one call.
  * Transaction paging stops at the 5-page hard ceiling; `truncated`/`total` let the
  * UI say "oldest N of M" instead of silently pretending the window is complete.
  * @param {string} token
@@ -303,7 +315,7 @@ export async function getState(token, opts = {}) {
   const [cats, accounts, txns] = await Promise.all([
     lm(token, "/categories"),
     getAccounts(token),
-    fetchUncategorized(token, start, end, maxPages),
+    fetchUnreviewed(token, start, end, maxPages),
   ]);
   return {
     categories: leafCategories(Array.isArray(cats.categories) ? cats.categories : []),
@@ -341,11 +353,11 @@ function chunk(arr, size) {
  * Bulk-set categories and mark reviewed.
  *
  * recheck "membership" (default — the only safe mode for normal flushes):
- *   fetches the current uncategorized window ONCE and membership-tests each update.
+ *   fetches the current unreviewed window ONCE and membership-tests each update.
  *   On a miss it falls back to per-id GET /v2/transactions/{id}:
  *     404                 -> skipped (deleted, or token re-pointed at another budget)
- *     still uncategorized -> sent   (merely outside the paged window / date range)
- *     categorized         -> skipped (someone or something got there first)
+ *     still unreviewed    -> sent   (merely outside the paged window / date range)
+ *     reviewed            -> skipped (someone or something got there first)
  *   Absence from the window alone NEVER discards a decision.
  *
  * recheck "none" (hidden-flush only): no network recheck; the caller must have
@@ -370,7 +382,7 @@ export async function applyCategories(token, updates, opts = {}) {
 
   if (recheck === "membership") {
     const range = defaultRange();
-    const window = await fetchUncategorized(
+    const window = await fetchUnreviewed(
       token,
       opts.startDate ?? range.start,
       opts.endDate ?? range.end,
@@ -395,7 +407,7 @@ export async function applyCategories(token, updates, opts = {}) {
       );
       batch.forEach((u, i) => {
         const t = current[i];
-        if (t && t.category_id === null) safe.push(u);
+        if (isOpen(t)) safe.push(u);
         else skipped.push(u.id);
       });
     }
