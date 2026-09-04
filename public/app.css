@@ -1392,3 +1392,359 @@ dialog.onboard:not([open]) { display: none; }
   text-align: center;
 }
 .upgrade-banner:active { transform: scale(.97); }
+
+/* ==========================================================================
+   fast category pickers (pk-*) — engine: public/lib/pickerui.js
+   Ported from the picker lab. Rules of this section:
+     - every transition/animation is <= 150ms (the whole point of the feature);
+     - tile colour is per-category hue in a custom property, set from JS with
+       style.setProperty("--h", …) because CSP forbids style="" in markup;
+     - OKLCH lightness 0.53 light / 0.50 dark at chroma 0.13 keeps white text
+       above 4.5:1 on every hue — no hsl() fallback (every target supports
+       oklch, and the fallback was a contrast regression);
+     - nothing here may scroll: the engine's fits() enforces it and the glue
+       falls back to the list picker when it returns false.
+   ========================================================================== */
+
+/* ---------- sheet host: faster slide, taller box, no scrolling ---------- */
+
+.sheet.pick-fast { transition-duration: .14s; max-height: 92dvh; }
+body.pick-fast-open .sheet-backdrop,
+.sheet-backdrop.pick-fast { transition-duration: .14s; }
+
+.sheet.pick-tiles .sheet-body,
+.sheet.pick-cols .sheet-body,
+.sheet.pick-dock .sheet-body,
+.sheet.pick-wheel .sheet-body {
+  overflow: hidden;
+  overscroll-behavior: none;
+  padding: 0 10px 12px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+.sheet.pick-tiles .sheet-body,
+.sheet.pick-cols .sheet-body { height: min(70dvh, 620px); }
+.sheet.pick-wheel .sheet-body { height: min(96vw, 62dvh); }
+.sheet.pick-dock .sheet-body { height: auto; }
+
+/* ---------- engine roots ---------- */
+
+.pk-root { position: relative; }
+.pk { height: 100%; min-height: 0; }
+
+.pk-tiles,
+.pk-right,
+.pk-dock-sub {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 3), 1fr);
+  gap: 6px;
+}
+.pk-tiles,
+.pk-right { grid-auto-rows: 1fr; }
+
+/* ---------- the tile: one control, every variant reuses it ---------- */
+
+.pk-tile {
+  --h: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
+  min-height: 0;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  background: oklch(0.53 0.13 var(--h));
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, .25);
+  transition: transform 70ms ease-out, filter 70ms ease-out, opacity 120ms ease-out;
+}
+@media (prefers-color-scheme: dark) {
+  .pk-tile { background: oklch(0.50 0.13 var(--h)); }
+}
+
+.pk-emoji { font-size: clamp(20px, 6vmin, 34px); line-height: 1; }
+/* no emoji on the category → two-letter monogram, so the tile still has a glyph */
+.pk-emoji.pk-mono { font-size: clamp(15px, 4.6vmin, 26px); font-weight: 800; letter-spacing: .01em; opacity: .92; }
+.pk-name {
+  font-size: clamp(11px, 3vmin, 15px);
+  font-weight: 600;
+  line-height: 1.15;
+  text-align: center;
+  max-width: 100%;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  hyphens: auto;
+}
+/* the chevron lives inside the name so it disappears with it on dock circles,
+   and so it cannot collide with the ::after "recently used" dot */
+.pk-group .pk-name::after { content: "\A0›"; opacity: .85; }
+
+.pk-hot {
+  position: absolute;
+  top: 4px;
+  right: 5px;
+  padding: 2px 4px;
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  background: rgba(0, 0, 0, .28);
+  color: #fff;
+  text-shadow: none;
+  opacity: .9;
+}
+/* touch-only devices have no hotkeys to hint at (hides the wheel's <text> too) */
+@media (hover: none) and (pointer: coarse) {
+  .pk-hot { display: none; }
+}
+
+.pk-tile.pk-guess::before { content: "★"; position: absolute; top: 3px; left: 5px; font-size: 11px; }
+.pk-tile.pk-recent::after {
+  content: "";
+  position: absolute;
+  bottom: 5px;
+  left: 6px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .85);
+}
+
+.pk-tile.pk-back {
+  background: transparent;
+  color: var(--ink);
+  text-shadow: none;
+  border: 1.5px dashed var(--line);
+}
+.pk-tile.pk-back .pk-hot { background: var(--line); color: var(--ink); }
+
+.pk-tile.pk-sel { outline: 3px solid var(--ink); outline-offset: -3px; }
+.pk-tile.pk-dim { opacity: .45; }
+
+/* ---------- press / commit feedback ---------- */
+
+.pk-press { transform: scale(.94); filter: brightness(1.12); transition-duration: 40ms; }
+.pk-tile.pk-hit { filter: brightness(1.28); transform: scale(1.03); z-index: 2; }
+.pk-tile.pk-fade { opacity: .35; }
+
+/* level swap: the new level pops in once, 120ms */
+@keyframes pk-pop { from { opacity: 0; transform: translateY(6px) scale(.985); } to { opacity: 1; transform: none; } }
+.pk-swap { animation: pk-pop .12s ease-out; }
+
+/* ---------- Columns ---------- */
+
+.pk-cols {
+  display: grid;
+  grid-template-columns: minmax(112px, 36%) 1fr;
+  gap: 8px;
+}
+.pk-left { display: flex; flex-direction: column; gap: 5px; min-height: 0; }
+.pk-left .pk-tile {
+  flex: 1;
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 11px;
+}
+.pk-left .pk-emoji { font-size: clamp(18px, 4.6vmin, 26px); }
+.pk-left .pk-emoji.pk-mono { font-size: 14px; }
+.pk-left .pk-name { text-align: left; }
+.pk-right { min-height: 0; }
+.pk-hint {
+  grid-column: 1 / -1;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  color: var(--muted);
+  font-size: 14px;
+  text-align: center;
+}
+
+/* ---------- Dock ---------- */
+
+.pk-dock { display: flex; flex-direction: column; justify-content: flex-end; gap: 8px; }
+.pk-dock-sub {
+  padding: 8px;
+  border-radius: 16px;
+  background: var(--bg);
+  box-shadow: 0 -2px 10px rgba(0, 0, 0, .08);
+  animation: pk-rise .12s ease-out;
+}
+@keyframes pk-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.pk-dock-sub .pk-tile {
+  min-height: 46px;
+  flex-direction: row;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 11px;
+}
+.pk-dock-sub .pk-emoji { font-size: 20px; }
+.pk-dock-sub .pk-emoji.pk-mono { font-size: 14px; }
+.pk-dock-sub .pk-name { text-align: left; font-size: 12px; }
+
+.pk-dock-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.pk-dock-row .pk-tile {
+  width: var(--ds, 56px);
+  height: var(--ds, 56px);
+  border-radius: 50%;
+  padding: 0;
+}
+.pk-dock-row .pk-emoji { font-size: calc(var(--ds, 56px) * .5); }
+.pk-dock-row .pk-emoji.pk-mono { font-size: calc(var(--ds, 56px) * .34); }
+.pk-dock-row .pk-name { display: none; }
+.pk-dock-row .pk-hot { top: -3px; right: -3px; }
+.pk-dock-row .pk-tile.pk-sel { outline: 3px solid var(--ink); outline-offset: 2px; }
+
+/* ---------- Wheel ---------- */
+
+/* explicit 1fr row: an auto row would size to the SVG's 1:1 intrinsic height
+   (= its width) and overflow a box that is wider than it is tall */
+.pk-wheel { display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr); place-items: center; height: 100%; width: 100%; min-height: 0; }
+.pk-wheel svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: visible;
+  touch-action: none;
+  /* default only — the builder's font-size presentation attributes win over
+     an inherited value, so per-wedge sizing still applies */
+  font: 700 9px/1 system-ui, -apple-system, sans-serif;
+}
+.pk-wedge {
+  --h: 0;
+  fill: oklch(0.53 0.13 var(--h));
+  stroke: var(--card);
+  stroke-width: 1.2;
+  transition: filter 70ms ease-out, opacity 120ms ease-out;
+}
+@media (prefers-color-scheme: dark) {
+  .pk-wedge { fill: oklch(0.50 0.13 var(--h)); }
+}
+.pk-wedge.pk-hov,
+.pk-wedge.pk-sel { filter: brightness(1.25); }
+.pk-wedge.pk-guess { stroke: #fff; stroke-width: 2; }
+/* dashed edge = used recently; distinct from the guess's solid white ring */
+.pk-wedge.pk-recent { stroke-dasharray: 3 3; }
+.pk-wedge.pk-dim { opacity: .35; }
+.pk-wedge.pk-press { filter: brightness(1.15); }
+.pk-wedge.pk-hit { filter: brightness(1.4); }
+.pk-wedge.pk-fade { opacity: .3; }
+g.pk-outer.pk-swap { animation: pk-fade-in .12s ease-out; }
+@keyframes pk-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+.pk-glyph {
+  fill: #fff;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+.pk-glyph.pk-mono { font-weight: 800; }
+/* mirrors the tiles' ::before star — the guess has to be findable on the wheel too */
+.pk-star { fill: #fff; text-anchor: middle; dominant-baseline: central; pointer-events: none; opacity: .9; }
+.pk-wheel text.pk-hot {
+  position: static;
+  padding: 0;
+  background: none;
+  border-radius: 0;
+  fill: rgba(255, 255, 255, .85);
+  font-size: 4.2px;
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+.pk-center { fill: var(--card); stroke: var(--line); }
+.pk-c1,
+.pk-c2 { text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+.pk-c1 { fill: var(--ink); font-size: 6px; font-weight: 650; }
+.pk-c2 { fill: var(--muted); font-size: 4.5px; font-weight: 500; }
+
+/* ---------- screen-reader surfaces ---------- */
+
+/* .pk-sr mirrors the (aria-hidden) wheel as real buttons; .pk-live announces
+   level changes. Both stay focusable/clickable — clipped, never display:none. */
+.pk-sr,
+.pk-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---------- onboarding "try it" panel (must fit 375x667) ---------- */
+
+.onboard-body:has(.ob-picker-panel) { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.onboard-step:has(.ob-picker-panel) { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+/* the try panel competes with the wizard's own chrome for a 667px-tall screen.
+   Trim the step's furniture (title, row padding) — never the 44px controls. */
+.onboard-body:has(.ob-picker-panel) { padding-bottom: 10px; }
+.onboard-step:has(.ob-picker-panel) .ob-title { font-size: 18px; margin: 2px 0 6px; }
+.onboard-step:has(.ob-picker-panel) .cutoff-row { padding: 2px 0 4px; gap: 6px; }
+.ob-picker-panel { display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1; }
+.ob-picker-root {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+/* sized by the panel, never by the viewport — the wizard is a full-screen
+   dialog and a dvh-sized wheel would push the footer off an iPhone SE. The
+   panel is short and wide, so HEIGHT is the binding constraint: let width
+   follow from the 1:1 ratio instead of fighting `height: 100%` for the box. */
+.ob-picker-panel .pk-wheel svg { width: auto; height: 100%; aspect-ratio: 1; }
+.ob-picker-sample {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 15px;
+}
+.ob-picker-sample .ob-picker-amt { margin-left: auto; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--muted); }
+.ob-picker-result { min-height: 18px; font-size: 13px; font-weight: 700; color: var(--accent); }
+.ob-picker-result:empty { visibility: hidden; }
+
+/* ---------- short viewports (landscape phones) ---------- */
+
+@media (max-height: 520px) {
+  .sheet.pick-tiles .sheet-body,
+  .sheet.pick-cols .sheet-body { height: min(74dvh, 300px); }
+  .sheet.pick-wheel .sheet-body { height: min(74dvh, 62vw); }
+  .pk-emoji { font-size: clamp(16px, 5vmin, 26px); }
+  .pk-dock-sub .pk-tile { min-height: 40px; }
+}
+
+/* "Try it" buttons in the wizard picker step and in Settings */
+.ob-try { /* small in-dialog secondary action (Try it) */
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px; /* same tap target as every other control in the dialog */
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 13px;
+  padding: 0 8px;
+  margin: -8px 0 4px;
+}

@@ -28,7 +28,8 @@ dopo.artems.net (assets-only Worker; works equally behind an auth proxy). ES mod
   - Headers: `"HTTP-Referer": location.origin` (the custom OpenRouter attribution header — NOT the
     forbidden `Referer`), `"X-Title": "dopo"`.
 - `lib/rules.js`, `lib/clean.js` — ports of rule matching + payee cleaning (pure, fixture-tested).
-- `lib/store.js` — storage: tokens + apply queue + Later pile pointers in localStorage;
+- `lib/store.js` — storage: tokens + apply queue + Later pile pointers + device prefs (cutoff,
+  audio, onboarding cursor, `dopo.picker.v1`, `dopo.hues.v1`) in localStorage;
   suggestion cache + Later bodies + state snapshot in IndexedDB (~2000-entry LRU, per-entry writes).
 - `lib/sync.js` — shared queue replay (boot replay + back-online resync): one membership recheck,
   chunked PUTs, poison-item isolation, make_rule absorption. Throws typed errors, never touches UI.
@@ -169,18 +170,35 @@ source of truth for transaction data; the device is the source of truth for pend
   day/month order follows the reader's own region. Bare `YYYY-MM-DD` is parsed as a LOCAL calendar
   day (`new Date("…")` is UTC midnight = the previous day west of Greenwich); the year is added only
   when it isn't the current one, and a time only when the source actually carries one.
+- **Category picker** (`dopo.picker.v1`, variants `tiles`/`cols`/`dock`/`wheel`/`list`): which
+  layout the category sheet uses. `pickerLoad()` returns `null` when unset so app.js can resolve the
+  default per install — **`tiles` for fresh installs, `list` for installs that predate the feature**
+  (detected by an already-stored LM token), then persist it so the one-time "new pickers" hint
+  fires once. `list` is also the automatic fallback for trees too large for a non-scrolling layout.
+  Settings has the same five chips plus a "Try" button.
+- **Category hues** (`dopo.hues.v1`): the persisted per-category hue map, keys `c:<id>` for leaves
+  and `g:<group name>` for groups, values integers 0..359. Hues are assigned once (largest angular
+  gap among already-assigned siblings) and then **never change**, which is the whole point — colours
+  are only learnable if they're stable across sessions, across live/offline boots, and across
+  category additions. Read drops invalid entries individually (losing the map = recolouring
+  everything); the map is capped at 512 keys, oldest first, and is never pruned against the current
+  tree because a snapshot boot legitimately sees a subset of it. Like `dopo.picker.v1`, it is a
+  device preference and **survives "Forget tokens"**.
 - **Onboarding wizard** (`#onboard`, a `<dialog>` in the top layer; replaces the old onboarding
-  card): 5 steps — welcome (what dopo does, the privacy line, an offline note) → lm (paste the LM
+  card): 6 steps — welcome (what dopo does, the privacy line, an offline note) → lm (paste the LM
   token, live-validated) → or (a real radio group, `own` first: `free` when a shared key is
   configured, else `none`; `own` reveals a key field and a 3-step how-to) → tune ("How far back?":
   cutoff chips always expanded as "Include transactions for" plus the live uncategorized count) →
-  done (gesture legend and the music/SFX toggles, which share the `setMusicPref`/`setSfxPref`
-  setters with Settings and are repainted from `audioPrefs` on entry). Split so each step fits an
-  iPhone SE without scrolling. Shown iff `!tokens.lm || cursor`; resumes at the persisted step, never at `welcome` once a
-  token exists. Returning users (Forget tokens) skip to `["lm","or"]` when a shared free tier
-  exists, else `["lm"]` alone — never silently defaulting a returning own-key user onto the shared
-  key. The last step's primary button reads "Done" on the returning path, "Start sorting" on a
-  first run.
+  picker (choose the category picker: five chips from `PICKER_META`, a one-line blurb, and a
+  "Try it" button that swaps the step body for a live in-place demo — no nested dialog; the choice
+  persists on selection and `canAdvance` always permits Continue) → done (gesture legend and the
+  music/SFX toggles, which share the `setMusicPref`/`setSfxPref` setters with Settings and are
+  repainted from `audioPrefs` on entry). Split so each step fits an iPhone SE without scrolling.
+  Shown iff `!tokens.lm || cursor`; resumes at the persisted step, never at `welcome` once a token
+  exists. Returning users (Forget tokens) skip to `["lm","or"]` when a shared free tier exists, else
+  `["lm"]` alone — never silently defaulting a returning own-key user onto the shared key, and never
+  re-asking for the picker (that preference already exists and outlives Forget tokens). The last
+  step's primary button reads "Done" on the returning path, "Start sorting" on a first run.
   - **Resume cursor** `dopo.onboard.v1` holds the current step id, written on every step change and
     removed on finish or Forget tokens. Invariant: the wizard is showing iff `!tokens.lm || cursor`.
   - **Containment**: while the wizard is open (`onboardingActive`) it owns the top layer alone —

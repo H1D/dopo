@@ -17,6 +17,7 @@ let failWrites = false;
 };
 
 import {
+  HUES_MAX_KEYS,
   KEEPALIVE_SNAPSHOT_FRESH_MS,
   LS_KEYS,
   cacheIsMemoryOnly,
@@ -26,6 +27,8 @@ import {
   cutoffSave,
   fetchWindow,
   getTokens,
+  huesLoad,
+  huesSave,
   isSuggestion,
   keepaliveEligible,
   laterAdd,
@@ -36,6 +39,8 @@ import {
   laterPut,
   laterRemove,
   loadLater,
+  pickerLoad,
+  pickerSave,
   queueLoad,
   queueMutate,
   queueSave,
@@ -215,6 +220,16 @@ describe("tokens", () => {
     expect(getTokens()).toEqual({ lm: "lm-2", or: "or-1" });
     setTokens({ or: "or-2" });
     expect(getTokens()).toEqual({ lm: "lm-2", or: "or-2" });
+  });
+
+  test("clearTokens leaves the device UI preferences alone — picker + hues survive", () => {
+    setTokens({ lm: "lm-1" });
+    pickerSave("wheel");
+    huesSave({ "c:12": 200 });
+    clearTokens();
+    expect(getTokens().lm).toBeNull();
+    expect(pickerLoad()).toBe("wheel"); // a re-pasted token must not move them to another picker
+    expect(huesLoad()).toEqual({ "c:12": 200 }); // …nor recolour every category they learned
   });
 
   test("clearTokens clears tokens ONLY — queue and rules survive", () => {
@@ -605,5 +620,100 @@ describe("deck cutoff — dopo.cutoff.v1", () => {
   test("a failed write throws so callers can switch to eager flush", () => {
     failWrites = true;
     expect(() => cutoffSave("3m")).toThrow();
+  });
+});
+
+describe("category picker preference — dopo.picker.v1", () => {
+  test("unset reads as null — the caller, not the store, resolves the default", () => {
+    expect(pickerLoad()).toBeNull();
+  });
+
+  test("round-trips every known variant", () => {
+    for (const id of ["tiles", "cols", "dock", "wheel", "list"] as const) {
+      pickerSave(id);
+      expect(pickerLoad()).toBe(id);
+    }
+    expect(backing.get(LS_KEYS.picker)).toBe('"list"');
+  });
+
+  test("an unknown variant clears the key rather than persisting garbage", () => {
+    pickerSave("tiles");
+    pickerSave("carousel");
+    expect(pickerLoad()).toBeNull();
+    expect(backing.has(LS_KEYS.picker)).toBe(false);
+  });
+
+  test("corrupt storage degrades to null instead of throwing", () => {
+    backing.set(LS_KEYS.picker, "{not json");
+    expect(pickerLoad()).toBeNull();
+    backing.set(LS_KEYS.picker, JSON.stringify({ id: "tiles" }));
+    expect(pickerLoad()).toBeNull();
+    backing.set(LS_KEYS.picker, JSON.stringify(3));
+    expect(pickerLoad()).toBeNull();
+  });
+
+  test("a failed write throws so callers can degrade to a session-only choice", () => {
+    failWrites = true;
+    expect(() => pickerSave("dock")).toThrow();
+  });
+});
+
+describe("category hue map — dopo.hues.v1", () => {
+  test("unset reads as an empty map", () => {
+    expect(huesLoad()).toEqual({});
+  });
+
+  test("round-trips a key -> hue map", () => {
+    huesSave({ "c:12": 0, "g:Food & Drinks": 359, "c:7": 180 });
+    expect(huesLoad()).toEqual({ "c:12": 0, "g:Food & Drinks": 359, "c:7": 180 });
+  });
+
+  test("invalid entries are dropped individually on read — one bad hue must not cost the map", () => {
+    backing.set(
+      LS_KEYS.hues,
+      JSON.stringify({
+        "c:1": 40,
+        "c:2": "200",
+        "c:3": -1,
+        "c:4": 360,
+        "c:5": 12.5,
+        "c:6": null,
+        "c:7": Number.NaN, // JSON-stringifies to null
+        "c:8": 359,
+      }),
+    );
+    expect(huesLoad()).toEqual({ "c:1": 40, "c:8": 359 });
+  });
+
+  test("write normalizes: fractions round, out-of-range wraps (a hue is an angle), non-numbers drop", () => {
+    huesSave({ "c:1": 40, "c:2": 400, "c:3": -5, "c:4": Number.POSITIVE_INFINITY, "c:5": 12.4, "c:6": 359.6 });
+    // 400 -> 40, -5 -> 355, 359.6 -> 360 -> 0. Dropping a key would recolour that
+    // category on the next load — the exact thing the map exists to prevent.
+    expect(huesLoad()).toEqual({ "c:1": 40, "c:2": 40, "c:3": 355, "c:5": 12, "c:6": 0 });
+    expect(Object.keys(huesLoad())).not.toContain("c:4"); // Infinity has no sane angle
+  });
+
+  test("a non-object payload (array, string, number) degrades to an empty map", () => {
+    backing.set(LS_KEYS.hues, JSON.stringify([1, 2, 3]));
+    expect(huesLoad()).toEqual({});
+    backing.set(LS_KEYS.hues, JSON.stringify("nope"));
+    expect(huesLoad()).toEqual({});
+    backing.set(LS_KEYS.hues, "{not json");
+    expect(huesLoad()).toEqual({});
+  });
+
+  test("the map is capped — oldest keys go first, newest survive", () => {
+    const big: Record<string, number> = {};
+    for (let i = 0; i < HUES_MAX_KEYS + 10; i++) big[`c:${i}`] = i % 360;
+    huesSave(big);
+    const stored = huesLoad();
+    expect(Object.keys(stored).length).toBe(HUES_MAX_KEYS);
+    expect(stored["c:0"]).toBeUndefined();
+    expect(stored[`c:${HUES_MAX_KEYS + 9}`]).toBe((HUES_MAX_KEYS + 9) % 360);
+  });
+
+  test("a failed write throws so callers can degrade to in-memory hues", () => {
+    failWrites = true;
+    expect(() => huesSave({ "c:1": 10 })).toThrow();
   });
 });

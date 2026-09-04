@@ -11,6 +11,17 @@ There is no backend. The whole app is a folder of vanilla ES modules served as s
 Lunch Money token and OpenRouter key live in your browser's storage and are sent by your browser
 directly to `api.lunchmoney.dev` and `openrouter.ai` — nowhere else.
 
+## Picking a category
+
+Tapping a card opens the picker: two taps, group then category, with every button acting on press
+rather than release so it keeps up with you. There are five layouts — **Tiles** (a colour grid),
+**Columns** (groups left, categories right), **Dock** (a row of groups above a grid), **Wheel** (a
+radial dial you can drag through) and **List** (the plain scrolling list, best for very large
+category sets, large text, or a screen reader). Each category keeps the same colour permanently, so
+you start recognising them by shape and hue instead of reading every label. Setup asks you to pick
+one and lets you try it there; you can switch any time under **Settings → Category picker**, where
+"Try" opens a throwaway demo that changes nothing.
+
 ## Privacy, honestly
 
 - Your tokens go browser → Lunch Money / OpenRouter directly. They are **never sent to the host**

@@ -134,6 +134,11 @@
       uncategorized in Lunch Money until you widen this.</div>
     <div class="cutoff-row" id="cutoffRow" role="group" aria-label="How far back to sort"></div>
     <div class="settings-info" id="cutoffLine"></div>
+    <div class="sheet-section">Category picker</div>
+    <div class="settings-info">How the category sheet lays out when you tap a card.</div>
+    <div class="cutoff-row" id="pickerRow" role="group" aria-label="Picker style"></div>
+    <p class="settings-info" id="pickerInfo"></p>
+    <button type="button" class="ob-try" id="pickerTry">Try it</button>
     <div class="sheet-section">Local rules</div>
     <div class="settings-info" id="rulesNote"></div>
     <div id="rulesList"></div>
@@ -234,6 +239,19 @@
       <p id="obCount" role="status">Loading your transactions…</p>
       <p class="ob-sub">Older transactions stay uncategorized in Lunch Money until you widen this — you can
         change it any time in Settings.</p>
+    </section>
+
+    <section class="onboard-step" data-step="picker" hidden>
+      <h2 class="ob-title" id="obTitlePicker" tabindex="-1">How do you want to pick categories?</h2>
+      <p>Two taps: group, then category. Every button keeps its colour so you learn them fast.</p>
+      <div class="cutoff-row" id="obPickerRow" role="group" aria-label="Picker style"></div>
+      <p class="settings-info" id="obPickerBlurb"></p>
+      <button type="button" class="ob-try" id="obPickerTry" aria-controls="obPickerPanel">Try it</button>
+      <div class="ob-picker-panel" id="obPickerPanel" hidden>
+        <div class="ob-picker-sample" id="obPickerSample"></div>
+        <div class="ob-picker-root" id="obPickerRoot"></div>
+        <div class="ob-picker-result" id="obPickerResult" aria-live="polite"></div>
+      </div>
     </section>
 
     <section class="onboard-step" data-step="done" hidden>

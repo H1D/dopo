@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { PAYLOADS } from "./payloads";
 
 /**
  * XSS property test for the card template (spec "CSP & XSS"): card markup must be
@@ -17,15 +18,6 @@ import { fileURLToPath } from "node:url";
 const cardPath = fileURLToPath(new URL("../public/lib/card.js", import.meta.url));
 const appPath = fileURLToPath(new URL("../public/app.js", import.meta.url));
 const sourcePath = existsSync(cardPath) ? cardPath : existsSync(appPath) ? appPath : null;
-
-const PAYLOADS = [
-  "<img src=x onerror=alert(1)>",
-  '"><img src=x onerror="fetch(`//evil`)">',
-  "'><svg onload=alert(1)>",
-  "<script>alert(1)</script>",
-  "&lt;fake-pre-escaped&gt;<b onmouseover=x>",
-  "` onfocus=alert(1) autofocus x=`",
-];
 
 // every user-influencable text field cardHTML renders
 const FIELDS = ["payee", "merchant", "notes", "lookup", "reasoning", "catName", "acctName"] as const;
