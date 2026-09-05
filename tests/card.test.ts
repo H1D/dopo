@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cardHTML, fmtTxnDate, parseTxnDate } from "../public/lib/card.js";
+import { bookedApart, cardHTML, fmtTxnDate, parseTxnDate } from "../public/lib/card.js";
 
 /** What the runner's own locale renders for a set of Intl options — the assertions
  *  below check that fmtTxnDate PICKED these options, not that any one locale wins. */
@@ -101,4 +101,27 @@ describe("cardHTML — second opinions on a categorized row", () => {
     );
     expect(html).toContain("Lunch Money has: &lt;b&gt;evil&lt;/b&gt;");
   });
+});
+
+describe("cardHTML — purchase moment", () => {
+  const base = { merchant: "Shop", payee: "SHOP", amount: "9.50", currency: "eur", date: "2026-08-25", notes: null, suggestion: null };
+  const now = new Date(2026, 8, 5);
+
+  test("with a time the date line shows the moment (hours:minutes), without one only the day", () => {
+    const withTime = cardHTML({ ...base, time: "2026-08-25T14:32:00" });
+    expect(withTime).toContain(rendered(new Date(2026, 7, 25, 14, 32), { day: "numeric", month: "long", hour: "numeric", minute: "2-digit" }));
+    expect(withTime).not.toContain("booked:");
+    expect(cardHTML(base)).not.toContain(":32");
+  });
+
+  test("a moment on another local day than the booking day files the booking day under details", () => {
+    const html = cardHTML({ ...base, time: "2026-08-23T18:05:00" });
+    expect(html).toContain("booked:");
+    expect(html).toContain(rendered(new Date(2026, 7, 25), { day: "numeric", month: "long" }));
+    expect(bookedApart("2026-08-25", "2026-08-23T18:05:00")).toBe(true);
+    expect(bookedApart("2026-08-25", "2026-08-25T18:05:00")).toBe(false);
+    expect(bookedApart("2026-08-25", null)).toBe(false);
+    expect(bookedApart("2026-08-25", "2026-08-25")).toBe(false); // a bare day carries no moment
+  });
+  void now;
 });

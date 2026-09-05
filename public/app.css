@@ -294,7 +294,14 @@ header.top {
   touch-action: pan-y;
   will-change: transform;
   overflow: hidden;
+  /* the card is a size container: the @container tiers below shrink the decorative parts
+     (ring, emoji, group line, reasoning lines) on short viewports instead of letting the
+     flex column crush the merchant / reasoning text into overlapping lines */
+  container-type: size;
 }
+/* text rows never shrink — when a card is still too tall the LAST rows clip, nothing overlaps */
+.card > .card-badge, .card > .merchant, .card > .amount, .card > .txn-date, .card > .reason,
+.card > .held-line, .card > .evidence, .card > .ask-ai, .card > .hero { flex-shrink: 0; }
 
 /* peek cards */
 .card.c1 { transform: translateY(16px) scale(.94); opacity: .85; pointer-events: none; z-index: 2; }
@@ -417,8 +424,8 @@ header.top {
 }
 .hero-ring {
   position: relative;
-  width: 108px;
-  height: 108px;
+  width: 96px;
+  height: 96px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -427,7 +434,7 @@ header.top {
 .hero-ring .ring-bg { stroke: var(--line); }
 .hero-ring .ring-fg { stroke: var(--accent); stroke-linecap: round; }
 .card.unsure .hero-ring .ring-fg { stroke: var(--warn); }
-.hero-emoji { font-size: 56px; line-height: 1; filter: drop-shadow(0 3px 6px rgba(31,36,48,.15)); }
+.hero-emoji { font-size: 44px; line-height: 1; filter: drop-shadow(0 3px 6px rgba(31,36,48,.15)); }
 
 .cat-chip {
   margin-top: 8px;
@@ -483,27 +490,37 @@ header.top {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  flex: 1;
-  min-height: 0;
 }
 
+/* ⓘ sits in the card's corner, the panel floats over the lower half: neither takes a row */
 .details-toggle {
-  margin-top: auto;
-  align-self: center;
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  min-width: 40px;
+  min-height: 40px;
   color: var(--muted);
-  font-size: 12px;
-  padding: 10px 22px;
+  font-size: 18px;
+  line-height: 1;
   border-radius: 999px;
 }
 .details-toggle:active { background: var(--accent-bg); }
 .details {
   display: none;
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 5;
   font-size: 12px;
   color: var(--muted);
   background: var(--bg);
+  border: 1px solid var(--line);
   border-radius: 10px;
+  box-shadow: var(--shadow);
   padding: 8px 10px;
-  max-height: 110px;
+  max-height: 55%;
   overflow-y: auto;
   overflow-wrap: anywhere;
   user-select: text;
@@ -511,6 +528,31 @@ header.top {
 }
 .card.details-open .details { display: block; }
 .details b { color: var(--ink); }
+
+/* short cards: shrink the hero first, then trim lines — merchant and amount stay full size longest.
+   Container heights are the card's CONTENT box (outer height minus 38px padding + 2px border):
+   the 480px phone stack is 440px here and gets the first tier; the 520px desktop stack does not. */
+@container (max-height: 450px) {
+  .hero { margin: 0 0 4px; }
+  .hero-ring { width: 80px; height: 80px; }
+  .hero-emoji { font-size: 36px; }
+  .cat-group { display: none; }
+  .merchant { font-size: 21px; }
+  .reason { margin-top: 6px; }
+  .evidence { margin-top: 4px; }
+}
+@container (max-height: 380px) {
+  .card-badge { margin-bottom: 2px; }
+  .hero { margin: 0 0 4px; }
+  .hero-ring { width: 62px; height: 62px; }
+  .hero-emoji { font-size: 28px; }
+  .cat-chip { margin-top: 4px; min-height: 40px; font-size: 13px; }
+  .merchant { font-size: 18px; margin-top: 4px; }
+  .amount { font-size: 24px; }
+  .reason { font-size: 14px; margin-top: 4px; -webkit-line-clamp: 2; }
+  .evidence { -webkit-line-clamp: 1; }
+  .unsure-hint { display: none; }
+}
 
 /* skeleton / empty */
 .card.skeleton { align-items: center; justify-content: center; gap: 14px; border-style: dashed; }
@@ -859,8 +901,28 @@ body.quaking > .actions {
 .settings-group[open] > .settings-summary::after { transform: rotate(90deg); }
 .settings-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .settings-group > .sheet-section:first-of-type { padding-top: 4px; }
-.tag-chip { flex: 0 1 auto; }
-.tag-chip.on { text-decoration: line-through; }
+/* skip-tag search-ahead picker: picked chips, a search box, matches (or the deck's own tags) */
+.tag-picker { display: flex; flex-direction: column; gap: 8px; padding: 6px 8px 8px; }
+.tag-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.tag-list:empty { display: none; }
+.cutoff-chip.tag-chip { flex: 0 1 auto; min-height: 40px; padding: 8px 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; } /* out-specifies .cutoff-chip's flex: 1 — chips size to their name */
+.tag-chip .tag-n, .tag-chip .tag-x { font-weight: 400; color: var(--muted); margin-left: 6px; }
+.tag-chip.on .tag-x { color: var(--accent); }
+.tag-search {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 14px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.tag-search:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
+.tag-search:disabled { opacity: .5; }
+.tag-empty { font-size: 12px; color: var(--muted); padding: 0 2px; }
 .ob-toggle { padding: 6px 4px; min-height: 40px; }
 
 .recent-row { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 4px 6px; }

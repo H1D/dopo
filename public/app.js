@@ -2212,21 +2212,92 @@ function main() {
     const all = [...(tagsKnown ?? [])];
     for (const t of scope.skipTags) if (!all.some((k) => k.id === t.id)) all.push(t);
     const on = new Set(scope.skipTags.map((t) => t.id));
-    const chipHtml = (/** @type {LMTag} */ t) =>
-      `<button type="button" class="cutoff-chip tag-chip${on.has(t.id) ? " on" : ""}"
-        data-tag="${Number(t.id)}" aria-pressed="${on.has(t.id) ? "true" : "false"}">${esc(t.name)}</button>`;
-    const chipsHtml = all.map(chipHtml).join("");
     let noteText;
-    if (all.length) noteText = `Tap a tag to keep its transactions out of the deck${on.size ? ` — skipping ${on.size}` : ""}.`;
+    if (all.length) noteText = on.size ? `Skipping ${on.size} — tap a tag to bring it back.` : "Search a tag to keep its transactions out of the deck.";
     else if (tagsInFlight) noteText = "Loading your tags…";
     else if (tagsKnown === null) noteText = "Couldn't load your tags — dopo tries again next time.";
     else noteText = "No tags in Lunch Money yet — tags you create there show up here.";
     /** @type {[HTMLElement, HTMLElement][]} */
     const targets = [[els.skipTagsRow, els.skipTagsNote], [els.obSkipTagsRow, els.obSkipTagsNote]];
-    for (const [row, noteEl] of targets) {
-      row.innerHTML = chipsHtml;
+    for (const [root, noteEl] of targets) {
+      paintTagPicker(root, all, on);
       noteEl.textContent = noteText;
     }
+  }
+  const TAG_RESULTS_MAX = 12;
+  /** How often each tag occurs on the loaded deck window — the quick picks under an empty
+   *  search, most-used first. Rows already skipped are not in `allTxns`, so their tags
+   *  only ever show in the picked list. @returns {Map<number, number>} */
+  function tagCountsInDeck() {
+    /** @type {Map<number, number>} */
+    const counts = new Map();
+    for (const t of allTxns) for (const id of t.tag_ids ?? []) counts.set(id, (counts.get(id) ?? 0) + 1);
+    return counts;
+  }
+  /** A search-ahead picker: the picked (skipped) tags as chips, a search box, and up to
+   *  TAG_RESULTS_MAX matches — or, while the box is empty, the tags actually seen on the deck.
+   *  The input is created once and never repainted, so typing keeps focus and caret.
+   *  @param {HTMLElement} root @param {LMTag[]} all @param {Set<number>} on */
+  function paintTagPicker(root, all, on) {
+    let input = root.querySelector("input.tag-search");
+    if (!(input instanceof HTMLInputElement)) {
+      root.innerHTML = `<div class="tag-list tag-picked" role="group" aria-label="Skipping"></div>
+        <input class="tag-search" type="search" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Search tags">
+        <div class="tag-list tag-results" role="group" aria-label="Matching tags"></div>
+        <div class="tag-empty" hidden></div>`;
+      input = root.querySelector("input.tag-search");
+      if (!(input instanceof HTMLInputElement)) return;
+    }
+    const picked = root.querySelector(".tag-picked");
+    const results = root.querySelector(".tag-results");
+    const empty = root.querySelector(".tag-empty");
+    if (!(picked instanceof HTMLElement) || !(results instanceof HTMLElement) || !(empty instanceof HTMLElement)) return;
+    const q = input.value.trim().toLowerCase();
+    input.placeholder = all.length ? `Search ${Number(all.length)} tags…` : "Search tags…";
+    input.disabled = !all.length;
+    const counts = tagCountsInDeck();
+    const chipHtml = (/** @type {LMTag} */ t, /** @type {boolean} */ isOn) => {
+      const n = counts.get(t.id) ?? 0;
+      const countHtml = n && !isOn ? `<span class="tag-n">${Number(n)}</span>` : "";
+      const xHtml = isOn ? '<span class="tag-x" aria-hidden="true">✕</span>' : "";
+      return `<button type="button" class="cutoff-chip tag-chip${isOn ? " on" : ""}"
+        data-tag="${Number(t.id)}" aria-pressed="${isOn ? "true" : "false"}">${esc(t.name)}${countHtml}${xHtml}</button>`;
+    };
+    picked.innerHTML = scope.skipTags.map((t) => chipHtml(t, true)).join("");
+    /** @type {LMTag[]} */
+    let list;
+    let hint = "";
+    if (q) {
+      list = all.filter((t) => !on.has(t.id) && t.name.toLowerCase().includes(q)).slice(0, TAG_RESULTS_MAX);
+      if (!list.length) hint = "No tag matches that.";
+    } else {
+      list = all.filter((t) => !on.has(t.id) && counts.has(t.id))
+        .sort((a, b) => (counts.get(b.id) ?? 0) - (counts.get(a.id) ?? 0)).slice(0, TAG_RESULTS_MAX);
+      if (list.length) hint = "On the current deck:";
+      else if (all.length && !on.size) hint = "Type to find a tag.";
+    }
+    results.innerHTML = list.map((t) => chipHtml(t, false)).join("");
+    empty.hidden = !hint;
+    empty.textContent = hint;
+  }
+  /** Click / type / Enter on one skip-tag picker; `onChanged` runs when the preference moved.
+   *  @param {HTMLElement} root @param {() => void} onChanged */
+  function wireTagPicker(root, onChanged) {
+    root.addEventListener("click", (e) => {
+      const b = e.target instanceof Element ? e.target.closest("[data-tag]") : null;
+      if (b instanceof HTMLElement && b.dataset.tag && toggleSkipTag(Number(b.dataset.tag))) onChanged();
+    });
+    root.addEventListener("input", (e) => {
+      if (e.target instanceof HTMLInputElement && e.target.classList.contains("tag-search")) renderTagRows();
+    });
+    root.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || !(e.target instanceof HTMLInputElement) || !e.target.classList.contains("tag-search")) return;
+      e.preventDefault(); // Enter = take the first match; never submits or advances the wizard
+      const first = root.querySelector(".tag-results [data-tag]");
+      if (!(first instanceof HTMLElement) || !first.dataset.tag) return;
+      e.target.value = "";
+      if (toggleSkipTag(Number(first.dataset.tag))) onChanged();
+    });
   }
   /** @param {number} id @returns {boolean} changed */
   function toggleSkipTag(id) {
@@ -3769,7 +3840,7 @@ function main() {
         const card = tog.closest(".card");
         if (card) {
           card.classList.toggle("details-open");
-          tog.textContent = card.classList.contains("details-open") ? "hide details" : "ⓘ details";
+          tog.textContent = card.classList.contains("details-open") ? "✕" : "ⓘ";
         }
         return;
       }
@@ -3805,10 +3876,7 @@ function main() {
       if (inc) { if (setIncludeFlag(inc, input.checked)) deckDirty = true; }
       else if (ai) setAiFlag(ai, input.checked);
     });
-    els.skipTagsRow.addEventListener("click", (e) => {
-      const b = e.target instanceof Element ? e.target.closest("[data-tag]") : null;
-      if (b instanceof HTMLElement && b.dataset.tag && toggleSkipTag(Number(b.dataset.tag))) deckDirty = true;
-    });
+    wireTagPicker(els.skipTagsRow, () => { deckDirty = true; });
     els.pickerRow.addEventListener("click", (e) => {
       const b = e.target instanceof Element ? e.target.closest("[data-picker]") : null;
       if (!(b instanceof HTMLElement) || !b.dataset.picker) return;
@@ -3871,14 +3939,11 @@ function main() {
       const inc = input ? parseBucket(input.dataset.include) : null;
       if (input && inc && setIncludeFlag(inc, input.checked)) void obLoad({ force: true });
     });
-    els.obSkipTagsRow.addEventListener("click", (e) => {
-      const b = e.target instanceof Element ? e.target.closest("[data-tag]") : null;
-      if (b instanceof HTMLElement && b.dataset.tag && toggleSkipTag(Number(b.dataset.tag))) void obLoad({ force: true });
-    });
+    wireTagPicker(els.obSkipTagsRow, () => void obLoad({ force: true }));
     els.onboard.addEventListener("keydown", (e) => {
       if (tryOpen) return; // the try panel is live: Enter belongs to the picker, never to Continue
       // Enter in a token field = Continue (when enabled); radios keep their native keys
-      if (e.key !== "Enter" || !(e.target instanceof HTMLInputElement) || e.target.type === "radio") return;
+      if (e.key !== "Enter" || !(e.target instanceof HTMLInputElement) || e.target.type === "radio" || e.target.type === "search") return;
       e.preventDefault();
       if (!els.obNext.disabled) void obContinue();
     });
