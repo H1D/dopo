@@ -1,4 +1,5 @@
 // @ts-check
+import { timeFromPayee } from "./clean.js";
 /**
  * Lunch Money v2 client — browser fetch, token passed per call, zero storage.
  * The token never leaves the device except toward api.lunchmoney.dev itself.
@@ -47,6 +48,9 @@ export class LMError extends Error {
  * @property {number|null} plaid_account_id
  * @property {number|null} manual_account_id
  * @property {number[]} [tag_ids]
+ * @property {string|null} [time]  the purchase moment when known — Plaid's `datetime` /
+ *   `authorized_datetime`, else the stamp inside an ABN card payee. `date` stays the booking day.
+ * @property {Record<string, unknown>|null} [plaid_metadata]  raw API rows only; slimTxn drops it
  */
 
 /**
@@ -293,6 +297,20 @@ export function isOpen(t) {
 }
 
 /**
+ * Lift the purchase moment out of Plaid's metadata blob and drop the blob itself: it is
+ * ~2× the rest of the row (`include_metadata=true` triples the page) and would otherwise
+ * land in the IndexedDB snapshot. Falls back to the timestamp ABN prints inside card payees.
+ * @param {LMTransaction} t
+ * @returns {LMTransaction}
+ */
+export function slimTxn(t) {
+  const { plaid_metadata, ...rest } = t;
+  const pm = plaid_metadata && typeof plaid_metadata === "object" ? plaid_metadata : null;
+  const stamp = pm && (typeof pm.datetime === "string" ? pm.datetime : typeof pm.authorized_datetime === "string" ? pm.authorized_datetime : null);
+  return { ...rest, time: stamp || timeFromPayee(t.payee) };
+}
+
+/**
  * One paged sweep of in-scope, non-pending transactions in the range.
  * Pages until `has_more` is false, HARD CEILING `maxPages`.
  * @param {string} token
@@ -317,9 +335,9 @@ async function fetchInScope(token, start, end, maxPages, scope) {
     /** @type {{transactions: LMTransaction[], has_more: boolean, total?: number}} */
     const page = await lm(
       token,
-      `/transactions?start_date=${start}&end_date=${end}&limit=${PAGE_LIMIT}&offset=${offset}`,
+      `/transactions?start_date=${start}&end_date=${end}&limit=${PAGE_LIMIT}&offset=${offset}&include_metadata=true`,
     );
-    const txns = Array.isArray(page.transactions) ? page.transactions : [];
+    const txns = (Array.isArray(page.transactions) ? page.transactions : []).map(slimTxn);
     out.push(...txns.filter((t) => inScope(t, scope)));
     if (typeof page.total === "number") apiTotal = page.total;
     if (!page.has_more) break;

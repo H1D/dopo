@@ -158,7 +158,8 @@ source of truth for transaction data; the device is the source of truth for pend
   (LM token, budget name, "Forget tokens on this device" — clears tokens only), **AI suggestions**
   (OR key — the shared free tier fills in —, web-check session counter, the per-bucket "Ask AI
   automatically about" checkboxes), **What to sort** (cutoff chips, the per-bucket "Include"
-  checkboxes, "Skip tagged" chips), **Category picker**, **Local rules**, **Badge & sound**. Both
+  checkboxes, the "Skip tagged" search-ahead picker), **Category picker**, **Local rules**,
+  **Badge & sound**. Both
   token fields are live-validated. Open/closed state is the user's within a session; app.js only
   forces a group open when it has something to show there (`openSettingsSheet(dead, {group})`: a
   dead LM token → account, a dead OR key / the AI hint bar / the upgrade banner → AI suggestions,
@@ -195,10 +196,15 @@ source of truth for transaction data; the device is the source of truth for pend
     verdict that lost to the held category is not re-asked.
   - Include / skip-tag changes are applied on sheet close like the cutoff (`deckDirty`); AI-flag
     changes just re-run `ensureClassified`. The wizard's tune step ("What to sort?") holds the
-    same cutoff chips, include checkboxes and skip-tag chips and refetches right away; its count
+    same cutoff chips, include checkboxes and skip-tag picker and refetches right away; its count
     line reads "N transactions to sort since <date>". Tags come from `GET /v2/tags` (`lm.getTags`,
     archived ones dropped), fetched on Settings open / tune-step entry; a saved skip tag the fetch
-    no longer returns stays as a chip so it can be switched off.
+    no longer returns stays as a picked chip so it can be switched off.
+  - The skip-tag picker (`paintTagPicker`, one per surface, both painted from the one preference)
+    is built for hundreds of tags: the picked tags as chips (tap = un-skip), a search box (matches
+    by substring, at most 12 shown, Enter takes the first), and under an empty box the tags that
+    actually occur on the loaded deck window with their counts — a tag nobody uses is never
+    listed unasked. The input is created once and not repainted, so typing keeps focus.
 - **Local rules**: pattern → category, delete only (creation stays on the undo toast). Deleting one
   clears rule-sourced suggestions and re-attaches from the remaining rules + caches, so a deleted
   rule leaves no ghost verdict on a card.
@@ -206,6 +212,22 @@ source of truth for transaction data; the device is the source of truth for pend
   day/month order follows the reader's own region. Bare `YYYY-MM-DD` is parsed as a LOCAL calendar
   day (`new Date("…")` is UTC midnight = the previous day west of Greenwich); the year is added only
   when it isn't the current one, and a time only when the source actually carries one.
+  - **Purchase moment**: the deck fetch asks for `include_metadata=true` (about 3× the page bytes)
+    and `lm.slimTxn` immediately lifts `plaid_metadata.datetime` (else `authorized_datetime`, else
+    the `dd.mm.yy/hh:mm` stamp ABN prints inside card payees — `clean.timeFromPayee`) into
+    `txn.time` and drops the blob, so neither the snapshot nor the queue ever hold it. The card's
+    date line shows the moment when known; when it falls on another local day than LM's booking
+    `date` (posting lag is common), the booking day sits under details as "booked:". Manual
+    accounts and rows without metadata keep showing the day alone.
+- **Card fit**: `.card` is a CSS size container. Text rows never flex-shrink (a too-tall card
+  clips its last row instead of crushing the merchant / reasoning into overlapping lines, the
+  bug this replaced); two `@container` height tiers (content box ≤450px = the 480px phone stack,
+  ≤380px = short phones) shrink the ring/emoji, drop the group line and hint, and trim clamp
+  lines. The details ⓘ lives in the card corner and its panel floats over the lower half, so
+  neither costs a row. Verified against 500 real rows × 5 card kinds at 390×844 and 375×560 with
+  zero overflow (2026-09-05). `cleanMerchant` also learned the ABN "BEA, Apple Pay …,PAS… NR:…,
+  dd.mm.yy/hh:mm CITY" terminal shape, Pay.nl's "inzake" phrasing, repeated " / " segments,
+  order/ticket codes and UUIDs, which took the p90 merchant from 66 to 24 characters.
 - **Category picker** (`dopo.picker.v1`, variants `tiles`/`cols`/`dock`/`wheel`/`list`): which
   layout the category sheet uses. `pickerLoad()` returns `null` when unset so app.js can resolve the
   default per install — **`tiles` for fresh installs, `list` for installs that predate the feature**

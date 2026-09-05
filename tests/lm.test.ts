@@ -51,6 +51,7 @@ describe("getState", () => {
 
     // pagination advanced by served page length
     const txnCalls = mock.callsTo("/v2/transactions?");
+    expect(txnCalls.every((c) => c.url.includes("include_metadata=true"))).toBe(true); // slimTxn lifts the moment, drops the blob
     expect(txnCalls.length).toBe(2);
     expect(txnCalls[0]!.url).toContain("offset=0");
     expect(txnCalls[1]!.url).toContain("offset=4");

@@ -106,6 +106,20 @@ export function fmtTxnDate(date, now = new Date()) {
 }
 
 /**
+ * True when the purchase moment falls on a different LOCAL calendar day than the booking
+ * day Lunch Money holds — the card then shows the moment and files the booking day under details.
+ * @param {unknown} date
+ * @param {unknown} time
+ * @returns {boolean}
+ */
+export function bookedApart(date, time) {
+  const d = parseTxnDate(date);
+  const w = time ? parseTxnDate(time) : null;
+  if (!d || !w || !w.hasTime) return false;
+  return d.at.getFullYear() !== w.at.getFullYear() || d.at.getMonth() !== w.at.getMonth() || d.at.getDate() !== w.at.getDate();
+}
+
+/**
  * Loose suggestion shape as rendered on a card.
  * @typedef {object} CardSuggestion
  * @property {number|null} [suggested_category_id]
@@ -123,6 +137,7 @@ export function fmtTxnDate(date, now = new Date()) {
  * @property {unknown} [amount]
  * @property {unknown} [currency]
  * @property {unknown} [date]
+ * @property {unknown} [time]  purchase moment (see lm.slimTxn); the card shows it in place of the booking day
  * @property {unknown} [notes]
  * @property {CardSuggestion|null} [suggestion]
  */
@@ -194,6 +209,8 @@ export function cardHTML(txn, { category = null, account = null, held = null, as
     : askAi === "idle"
       ? '<button class="ask-ai" type="button">✨ Ask AI</button>'
       : "";
+  const whenHtml = esc(fmtTxnDate(t.time || t.date));
+  const bookedRowHtml = bookedApart(t.date, t.time) ? `<div><b>booked:</b> ${esc(fmtTxnDate(t.date))}</div>` : "";
   const lookupRowHtml = s?.lookup ? `<div><b>lookup:</b> ${esc(s.lookup)}</div>` : "";
   const notesRowHtml = t.notes ? `<div><b>notes:</b> ${esc(t.notes)}</div>` : "";
   const stampHtml = confident ? "SORTED ✓" : "CHOOSE";
@@ -215,14 +232,15 @@ export function cardHTML(txn, { category = null, account = null, held = null, as
       </div>
       <div class="merchant">${esc(t.merchant || t.payee || "Unknown")}</div>
       <div class="amount ${esc(a.dir)}">${esc(a.sign)}${esc(a.abs)}<span class="cur">${esc(a.cur)}</span></div>
-      <div class="txn-date">${esc(fmtTxnDate(t.date))}${acctHtml}</div>
+      <div class="txn-date">${whenHtml}${acctHtml}</div>
       <div class="reason">${esc(s?.reasoning || "not classified yet")}</div>
       ${heldHtml}
       ${evidenceHtml}
       ${askHtml}
-      <button class="details-toggle" type="button">ⓘ details</button>
+      <button class="details-toggle" type="button" aria-label="Details">ⓘ</button>
       <div class="details">
         <div><b>raw:</b> ${esc(t.payee || "—")}</div>
+        ${bookedRowHtml}
         ${lookupRowHtml}
         ${notesRowHtml}
       </div>
