@@ -362,3 +362,25 @@ describe("orChoices", () => {
     expect(ownWithFree).toEqual(ownWithout);
   });
 });
+
+// install step — iOS browser tabs only, ahead of any token
+describe("install step", () => {
+  test("offerInstall puts it first on a first run and nowhere else", () => {
+    expect(stepsFor({ offerInstall: true })).toEqual(["install", "welcome", "lm", "or", "tune", "picker", "done"]);
+    expect(stepsFor({ offerInstall: false })).toEqual(["welcome", "lm", "or", "tune", "picker", "done"]);
+    expect(stepsFor({ returning: true, offerInstall: true })).toEqual(["lm"]);
+    expect(stepsFor({ returning: true, hasFreeTier: true, offerInstall: true })).toEqual(["lm", "or"]);
+    expect(parseStep("install")).toBe("install"); // a persisted cursor resumes there
+  });
+
+  test("primary shows the steps (never advances by itself); the secondary is the way on; no Back", () => {
+    const steps = stepsFor({ offerInstall: true });
+    const a = canAdvance({ stepId: "install", steps, field: FIELD_IDLE, saved: false, choice: null, returning: false });
+    expect(a).toEqual({ canContinue: true, primary: "Show me how", secondary: "Set up here anyway", showBack: false, checkFirst: false });
+    // a netfail left over from nowhere must not relabel it (same guard as picker)
+    const b = canAdvance({ stepId: "install", steps, field: { status: "netfail", value: "x" }, saved: false, choice: null, returning: false });
+    expect(b.primary).toBe("Show me how");
+    expect(nextStep(steps, "install")).toBe("welcome");
+    expect(prevStep(steps, "welcome")).toBe("install");
+  });
+});

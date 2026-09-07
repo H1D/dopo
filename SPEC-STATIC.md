@@ -39,10 +39,14 @@ dopo.artems.net (assets-only Worker; works equally behind an auth proxy). ES mod
   cache-first; new names bypass the stale cache so the new app boots on the first post-cutover visit.
 - `sw.js` (path unchanged — required for update detection): precache derived from
   `self.registration.scope`; `VERSION = "__DOPO_VERSION__"` placeholder stamped at deploy;
-  exception-only offline fallback: on navigation fetch REJECTION (never on status/type)
-  serve the cached shell mapped by pathname (scope root/index[.html] → index.html —
-  hosts canonicalize .html URLs, accept both spellings — else offline.html, else
-  Response.error()); install fetches FOLLOW redirects but
+  the app shell is CACHE-FIRST like every other precached file: a navigation mapped by pathname
+  to the shell (scope root/index[.html] → index.html — hosts canonicalize .html URLs, accept both
+  spellings) is answered from the CURRENT version's cache when present, so index.html can never be
+  newer than the app.js/app.css next to it (network-first HTML once shipped the new wizard markup
+  styled by the old stylesheet while a new SW sat waiting); a version lands as a whole when the
+  next SW activates. A cache miss goes to the network UNCHANGED; only on fetch REJECTION (never
+  on status/type) offline.html, else Response.error(). Navigation preload is off (the shell
+  never needs the network). Install fetches FOLLOW redirects but
   accept only a same-origin 200 with a sane content-type (Cloudflare assets 307s
   .html paths; an Access chain ends off-origin and still fails install atomically); `/api` interception
   rules removed (there is no API); connect-src does not include foreign origins for the SW itself.
@@ -149,8 +153,9 @@ source of truth for transaction data; the device is the source of truth for pend
   stale queued decision; iOS standalone and Safari-tab containers are isolated — queue and chip counts don't span them;
   a sheet left open >10 min ages out keepalive eligibility (sync defers to replay); the snapshot
   comparator misses in-place edits on identical id-sets (next content change repairs); offline
-  boot works from the second visit after a deploy (the new SW must activate first — do not "fix"
-  with skipWaiting).
+  boot works from the second visit ever (the SW must activate first — do not "fix" with
+  skipWaiting); a deploy never degrades it, since the old SW keeps serving its own complete cache
+  until the new one activates.
 
 ## Settings / onboarding
 

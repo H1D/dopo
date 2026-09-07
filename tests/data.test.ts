@@ -192,6 +192,39 @@ describe("attach — cached verdicts on LM-held rows", () => {
     expect([1, 2, 3, 4].map((id) => byId.get(id)!.aiChecked)).toEqual([true, true, true, true]);
     expect(byId.get(5)!.aiChecked).toBe(false);
   });
+
+  test("a pass-1 verdict stamped with a different merchant is ignored — the payee changed since the model saw it", async () => {
+    await snapshotSave(
+      {
+        categories: [{ id: 101, name: "Groceries", group: null }, { id: 102, name: "Public Transit", group: null }],
+        accounts: [],
+        transactions: [
+          { ...rawTxn(1, "Spotify AB"), category_id: 102 }, // was "NS Reizigers" when the model answered
+          { ...rawTxn(2, "Albert Heijn"), category_id: 102 },
+          rawTxn(3, "Renamed Shop"),
+        ],
+        truncated: false,
+        total: 3,
+      },
+      1,
+    );
+    await sugPut("txn:1", { suggested_category_id: 102, confidence: 0.9, reasoning: "trains", merchant: "ns reizigers" });
+    await sugPut("txn:2", { suggested_category_id: 101, confidence: 0.9, reasoning: "groceries", merchant: merchantKeyOf(cleanMerchant("Albert Heijn")) });
+    await sugPut("txn:3", { suggested_category_id: 101, confidence: 0.9, reasoning: "groceries", merchant: "old name" });
+    mock = new MockFetch().install();
+    const res = await assembleFromSnapshot([]);
+    const byId = new Map(res!.transactions.map((t) => [t.id, t]));
+    // stale stamp on an LM-held row: plain "already categorized" — never "AI agrees"
+    expect(byId.get(1)!.suggestion).toMatchObject({ source: "lm", suggested_category_id: 102 });
+    expect(byId.get(1)!.suggestion!.reasoning).not.toContain("AI agrees");
+    expect(byId.get(1)!.aiChecked).toBe(false);
+    // matching stamp: weighed as before (confident disagreement takes the card)
+    expect(byId.get(2)!.suggestion).toMatchObject({ source: "ai", suggested_category_id: 101 });
+    expect(byId.get(2)!.aiChecked).toBe(true);
+    // stale stamp on a bare row: no suggestion, pass 1 asks again
+    expect(byId.get(3)!.suggestion).toBeNull();
+    expect(byId.get(3)!.aiChecked).toBe(false);
+  });
 });
 
 describe("assembleFromSnapshot — offline boot assembly", () => {

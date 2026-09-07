@@ -44,6 +44,7 @@ export const LS_KEYS = {
   onboard: "dopo.onboard.v1",
   picker: "dopo.picker.v1",
   hues: "dopo.hues.v1",
+  install: "dopo.install.v1",
 };
 
 // ---------------------------------------------------------------------------
@@ -426,6 +427,22 @@ export function onboardCursorSave(id) {
 
 export function onboardCursorClear() {
   lsRemove(LS_KEYS.onboard);
+}
+
+// ---------------------------------------------------------------------------
+// install hint — the "Add dopo to your Home Screen" banner, dismissed once per
+// device (browser-tab storage; the installed app has its own and never shows it)
+// ---------------------------------------------------------------------------
+
+/** @returns {number|null}  ms epoch of the dismissal, null when never dismissed */
+export function installHintDismissedLoad() {
+  const v = lsGet(LS_KEYS.install);
+  return typeof v === "number" ? v : null;
+}
+
+/** @param {number} [now] */
+export function installHintDismiss(now = Date.now()) {
+  try { lsSet(LS_KEYS.install, now); } catch { /* advisory: the banner just returns next visit */ }
 }
 
 // ---------------------------------------------------------------------------

@@ -168,13 +168,29 @@ export async function attachSuggestions(txns, rules, categories) {
     const mk = merchantKeyOf(t.merchant);
     const web = mk ? cache.get("m:" + mk) : undefined;
     const ai = cache.get("txn:" + t.id);
-    // web beats pass 1 (mergeAi keeps a web verdict over an ai one), so apply ai first
-    if (isSuggestion(ai)) { t.aiChecked = true; t.suggestion = mergeAi(t, fromCache(ai, "ai"), isLeaf); }
+    // web beats pass 1 (mergeAi keeps a web verdict over an ai one), so apply ai first.
+    // A pass-1 verdict is about the payee the model was shown: one stamped with a
+    // different merchant (the payee changed since — a Lunch Money rename, a Plaid
+    // pending→posted rewrite) is ignored rather than read as "AI agrees" on a card
+    // that now says something else entirely; pass 1 simply asks again.
+    if (isSuggestion(ai) && verdictFits(ai, mk)) { t.aiChecked = true; t.suggestion = mergeAi(t, fromCache(ai, "ai"), isLeaf); }
     if (isSuggestion(web) && web.suggested_category_id != null) {
       t.aiChecked = true;
       t.suggestion = mergeAi(t, fromCache(web, "web"), isLeaf);
     }
   }
+}
+
+/**
+ * Whether a cached pass-1 verdict was computed for the merchant the row shows
+ * now. Verdicts written before the stamp existed carry none and are trusted.
+ * @param {object} c  a cached (isSuggestion-shaped) record
+ * @param {string|null} mk  merchantKeyOf(t.merchant)
+ * @returns {boolean}
+ */
+function verdictFits(c, mk) {
+  const m = /** @type {{merchant?: unknown}} */ (c).merchant;
+  return typeof m !== "string" || m === mk;
 }
 
 /**
@@ -259,6 +275,8 @@ export function askable(t) {
  * @returns {Promise<void>}
  */
 export async function classifyPass1(orToken, categories, txns, onSlice, opts = {}) {
+  // stamp each verdict with the merchant it was computed for (see verdictFits)
+  const keyOf = new Map(txns.map((t) => [t.id, merchantKeyOf(t.merchant)]));
   await classifyTransactions(orToken, txns, categories, {
     model: opts.model,
     concurrency: opts.concurrency,
@@ -272,6 +290,7 @@ export async function classifyPass1(orToken, categories, txns, onSlice, opts = {
           confidence: s.confidence,
           reasoning: s.reasoning,
           created_at: now,
+          merchant: keyOf.get(s.id) ?? null,
         };
         sugPut("txn:" + s.id, cached).catch(() => { /* cache write is best-effort */ });
         out.set(s.id, fromCache(cached, "ai"));
