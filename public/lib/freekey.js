@@ -43,11 +43,9 @@ export const FREE_KEY = STAMPED_KEY.startsWith("__") ? "" : STAMPED_KEY;
 export const FREE_MODELS = [
   // probed 2026-09-03 with the real pass-1 prompt: correct, ~2s per batch
   "nvidia/nemotron-3-super-120b-a12b:free",
-  // correct, ~8s per batch (reasons at length)
-  "minimax/minimax-m2.7:free",
-  // closest cousin of the paid model; its single provider 429'd for hours that day
-  "z-ai/glm-5.2:free",
   "google/gemma-4-31b-it:free",
+  // minimax/minimax-m2.7:free and z-ai/glm-5.2:free were withdrawn from
+  // OpenRouter by 2026-09-08 (the guardrail API rejects unknown ids).
 ];
 
 /** In-flight requests on the free key. The 20 req/min cap is shared account-wide. */
