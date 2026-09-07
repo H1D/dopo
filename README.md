@@ -16,7 +16,8 @@ links render as plain links, not players. To fill this in: open this file in the
 drag dopo.mp4 onto the line below, and GitHub inserts the URL. Keep the URL on its own line.
 -->
 
-https://github.com/user-attachments/assets/REPLACE-WITH-UPLOADED-VIDEO-ID
+https://github.com/user-attachments/assets/65f592c7-3328-4c6b-9181-45880710ead7
+
 
 There is no backend. The whole app is a folder of vanilla ES modules served as static files. Your
 Lunch Money token and OpenRouter key live in your browser's storage and are sent by your browser
