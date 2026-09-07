@@ -9,15 +9,12 @@ you stay the judge. No key yet? A shared free tier gets you started (see [What i
 
 ## See it
 
-<!--
-GitHub renders an inline video player only for files uploaded through its own web UI (the URL
-looks like https://github.com/user-attachments/assets/<uuid>). Committed .mp4 files and raw.githubusercontent.com
-links render as plain links, not players. To fill this in: open this file in the GitHub web editor,
-drag dopo.mp4 onto the line below, and GitHub inserts the URL. Keep the URL on its own line.
--->
+<!-- The table cell is the only way to size GitHub's video player; a bare URL renders full width. -->
+<table align="center"><tr><td width="280">
 
 https://github.com/user-attachments/assets/65f592c7-3328-4c6b-9181-45880710ead7
 
+</td></tr></table>
 
 There is no backend. The whole app is a folder of vanilla ES modules served as static files. Your
 Lunch Money token and OpenRouter key live in your browser's storage and are sent by your browser
