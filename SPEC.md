@@ -64,7 +64,7 @@ default view. The table lives on at `/table.html` (rules management). Vanilla JS
 
 - On accept/override: push `{id, category_id, make_rule?, ts}` to a localStorage-backed queue SYNCHRONOUSLY,
   then animate. Queue survives tab death.
-- Undo (5s, bottom-anchored toast, fat target): an item is flushable ONLY after its undo toast is
+- Undo (5s, top-anchored toast under the header — clear of the thumb-zone buttons — fat target): an item is flushable ONLY after its undo toast is
   dismissed (event-driven flag on the item — not parallel timers). Undo = remove from queue +
   reinsert card at deck front + decrement progress/streak (park-undo: remove from Later + reinsert).
   Undo after a celebration dismisses the celebration overlay.

@@ -29,6 +29,7 @@ import {
   audioLoad, audioSave,
   onboardCursorLoad, onboardCursorSave, onboardCursorClear,
   pickerLoad, pickerSave, huesLoad, huesSave,
+  installHintDismissedLoad, installHintDismiss,
 } from "./lib/store.js";
 import {
   buildTree, maxLevel, MAX_LEVEL, assignHues, PICKER_META, DEMO_CATEGORIES, labelOf,
@@ -327,6 +328,9 @@ function main() {
   /** @type {ServiceWorker|null} */
   let updateReady = null; // waiting SW offered via the "New version" toast
   let updateToastPending = false; // toast suppressed by an open sheet / active drag
+  /** Chrome's deferred install prompt (beforeinstallprompt); iOS has none — the hint shows steps instead.
+   *  @type {(Event & {prompt: () => Promise<unknown>})|null} */
+  let installPrompt = null;
   let updateInitiated = false; // this tab tapped the toast
   let reloadLatch = false; // controllerchange must reload at most once
 
@@ -420,6 +424,8 @@ function main() {
     webBar: $el("#webBar"), webBarBtn: $btn("#webBarBtn"),
     connChip: $el("#connChip"), staleBanner: $el("#staleBanner"), stuckBanner: $btn("#stuckBanner"),
     upgradeBanner: $btn("#upgradeBanner"),
+    installBanner: $el("#installBanner"), installBtn: $btn("#installBtn"), installDismiss: $btn("#installDismiss"),
+    installPop: $el("#installPop"),
     updateToast: $el("#updateToast"), updateBtn: $btn("#updateBtn"),
     confetti: $canvas("#confetti"),
   };
@@ -544,6 +550,7 @@ function main() {
     snapshotFetchedAt = null; // leaves snapshot mode; stale banner clears via updateConnUI
     stateError = null;
     noteConnOutcome("lm", null);
+    updateInstallBanner();
     if (data.truncated && !truncationNoted) {
       truncationNoted = true;
       note(`Sorting the oldest ${allTxns.length}${data.total ? ` of ${data.total}` : ""} in range`);
@@ -2737,7 +2744,10 @@ function main() {
     if (onboardingActive) return; // load-bearing: routeLMError re-enters on every failed retry
     onboardingActive = true;
     obReturning = opts.returning === true;
-    obSteps = stepsFor({ returning: obReturning, hasFreeTier: hasFreeTier() });
+    // iOS browser tab only: the Home Screen app has separate storage, so the pitch
+    // to install belongs BEFORE a token is pasted (Android's installed PWA shares
+    // the browser's storage — nothing to warn about there)
+    obSteps = stepsFor({ returning: obReturning, hasFreeTier: hasFreeTier(), offerInstall: isIOS() && !isStandalone() });
     // Tear the deck down: whatever is loaded belongs to tokens that are gone or
     // unverified, and a live deck would keep pulling on the network behind the wizard.
     abortDrag();
@@ -2752,6 +2762,7 @@ function main() {
     renderStack();
     updateMeters();
     updateConnUI();
+    els.installBanner.hidden = true; // the wizard owns the screen; the hint returns with the live deck
     obChoice = null;
     obField = { lm: FIELD_IDLE, or: FIELD_IDLE };
     obDead = { lm: false, or: false };
@@ -2776,8 +2787,8 @@ function main() {
     if (obReturning) return first;
     const cursor = onboardCursorLoad();
     let start = cursor !== null && obSteps.includes(cursor) ? cursor : first;
-    if (tokens.lm && start === "welcome") start = "lm";
-    if (!tokens.lm && start !== "welcome" && start !== "lm") start = "lm";
+    if (tokens.lm && (start === "welcome" || start === "install")) start = "lm";
+    if (!tokens.lm && start !== "welcome" && start !== "lm" && start !== "install") start = "lm";
     return start;
   }
 
@@ -2791,6 +2802,7 @@ function main() {
     els.obNote.hidden = true;
     els.obNote.textContent = "";
     maybeShowUpdateToast(); // a "New version" toast suppressed by the wizard may surface now
+    updateInstallBanner();
     if (pendingSheetResync) { pendingSheetResync = false; scheduleOnlineResync(); } // wizard-blocked online refresh re-arms
   }
 
@@ -3041,6 +3053,10 @@ function main() {
     obContinuing = true;
     try {
       const step = obStep;
+      if (step === "install") { // "Show me how": the steps popover, no advance — the secondary moves on
+        showInstallSteps(els.onboard);
+        return;
+      }
       const which = obFieldOf();
       let adv = obAdvance();
       if (which && (adv.checkFirst || obField[which].status === "checking")) {
@@ -3070,8 +3086,14 @@ function main() {
     }
   }
 
-  /** Secondary button ("Continue anyway" after a netfail): commit unverified. */
+  /** Secondary button: "Set up in Safari anyway" on the install step moves on;
+   *  "Continue anyway" after a netfail commits unverified. */
   function obSecondaryTap() {
+    if (obStep === "install") {
+      const n = nextStep(obSteps, obStep);
+      if (n) obGoto(n);
+      return;
+    }
     const which = obFieldOf();
     if (!which) return;
     obField[which] = nextFieldState(obField[which], { type: "arm" });
@@ -3633,6 +3655,45 @@ function main() {
     els.upgradeBanner.hidden = false;
   }
 
+  // ---------- "Add to Home Screen" hint ----------
+  // Browser tabs only (the installed app never sees it), once the deck is live —
+  // a user who has sorted a card is the one worth nudging. Dismissed = gone for
+  // good on this device (lib/store.js). Chrome hands us a real prompt; iOS has
+  // none, so the tap opens the Share → Add to Home Screen steps instead.
+  const isStandalone = () => matchMedia("(display-mode: standalone)").matches
+    || /** @type {{standalone?: boolean}} */ (navigator).standalone === true;
+  const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); // iPadOS reports as a Mac
+  function updateInstallBanner() {
+    const show = !isStandalone() && !onboardingActive && loadState === "live" && !!tokens.lm
+      && installHintDismissedLoad() === null && (installPrompt !== null || isIOS());
+    els.installBanner.hidden = !show;
+  }
+  async function onInstallTap() {
+    if (installPrompt && !isIOS()) { // every iOS browser is WebKit: Share → Add to Home Screen is the only way
+      const p = installPrompt;
+      installPrompt = null; // a prompt event can be used once
+      try { await p.prompt(); } catch { /* browser refused: nothing to do */ }
+      updateInstallBanner(); // hidden until Chrome offers again, or for good on appinstalled
+      return;
+    }
+    showInstallSteps(document.body);
+  }
+  /** The steps popover is shared by the banner (page) and the wizard's install step
+   *  (a modal <dialog>). A popover OUTSIDE the topmost modal dialog is inert — "Got it"
+   *  would be dead — so it is reparented next to whoever opens it; a closed dialog
+   *  is display:none, which is why it can't simply live inside the wizard.
+   *  @param {HTMLElement} host */
+  function showInstallSteps(host) {
+    if (els.installPop.matches(":popover-open")) return;
+    if (els.installPop.parentElement !== host) host.appendChild(els.installPop);
+    els.installPop.showPopover();
+  }
+  function dismissInstallHint() {
+    installHintDismiss();
+    els.installBanner.hidden = true;
+  }
+
   function updateStaleBanner() {
     if (loadState !== "snapshot" || snapshotFetchedAt == null) { els.staleBanner.hidden = true; return; }
     els.staleBanner.textContent = `Showing data from ${relAge(snapshotFetchedAt)} — will refresh when online`;
@@ -3956,6 +4017,47 @@ function main() {
     });
     els.stuckBanner.addEventListener("click", onStuckTap);
     els.upgradeBanner.addEventListener("click", () => openSettingsSheet(null, { group: "ai" }));
+    // ---- "Add to Home Screen" hint
+    els.installBtn.addEventListener("click", () => { void onInstallTap(); });
+    els.installDismiss.addEventListener("click", dismissInstallHint);
+    window.addEventListener("beforeinstallprompt", (e) => {
+      e.preventDefault(); // Chrome's mini-infobar would otherwise fire on its own schedule
+      installPrompt = /** @type {Event & {prompt: () => Promise<unknown>}} */ (e);
+      updateInstallBanner();
+    });
+    window.addEventListener("appinstalled", () => { installPrompt = null; dismissInstallHint(); });
+    // ---- iOS: no pinch zoom, keyboard-aware wizard
+    // Safari (a browser tab) ignores user-scalable=no for accessibility, but it does
+    // honour cancelled gesture events; the installed app honours the meta itself.
+    for (const ev of ["gesturestart", "gesturechange"]) {
+      document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+    }
+    // iOS never shrinks the layout viewport for the keyboard, only the visual one:
+    // publish its box so dialog.onboard can size to it (app.css), and keep the
+    // focused field in view — the footer with Continue lands above the keys.
+    const vv = window.visualViewport;
+    if (vv) {
+      let vvRaf = 0;
+      // coalesced to one write per frame: iOS fires scroll per frame while the
+      // keyboard/URL bar animates, and a per-event style write would jitter
+      const syncVisualViewport = () => {
+        if (vvRaf) return;
+        vvRaf = requestAnimationFrame(() => {
+          vvRaf = 0;
+          const s = document.documentElement.style;
+          s.setProperty("--vv-h", `${Math.round(vv.height)}px`);
+          s.setProperty("--vv-top", `${Math.round(vv.offsetTop)}px`);
+        });
+      };
+      vv.addEventListener("resize", () => {
+        syncVisualViewport();
+        // once per keyboard open/close, not per scroll frame — Safari's own focus scroll must not be fought
+        const a = document.activeElement;
+        if (onboardingActive && a instanceof HTMLInputElement) a.scrollIntoView({ block: "nearest" });
+      });
+      vv.addEventListener("scroll", syncVisualViewport);
+      syncVisualViewport();
+    }
     els.badgeToggle.addEventListener("change", async () => {
       badgeEnabled = els.badgeToggle.checked;
       try { localStorage.setItem(LS.badge, badgeEnabled ? "1" : "0"); } catch { /* session-only then */ }

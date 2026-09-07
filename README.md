@@ -123,7 +123,9 @@ merchant cache, the offline snapshot, any not-yet-synced queue, and the service 
 offline boot is impossible afterward anyway. Everything already synced is in Lunch Money either
 way — eviction costs you convenience (and any unsynced queue), not your budget data. Note the
 installed app and Safari use separate storage: a token pasted in Safari doesn't exist in the
-installed app, and queued changes sync per container.
+installed app, and queued changes sync per container. A browser tab shows a one-time
+"Add dopo to your Home Screen" hint under the meter once the deck is live — tap it for the steps
+(or, on Chrome/Android, the install prompt), or ✕ to never see it again on that device.
 
 ## Self-hosting
 

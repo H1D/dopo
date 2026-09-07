@@ -65,6 +65,7 @@ body {
   overscroll-behavior: none;
   user-select: none;
   -webkit-user-select: none;
+  touch-action: manipulation; /* no double-tap zoom; pinch is cancelled in app.js (gesturestart) */
 }
 
 button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; touch-action: manipulation; }
@@ -757,20 +758,25 @@ body.quaking > .actions {
 }
 @keyframes note-in { from { opacity: 0; transform: translate(-50%, 10px); } }
 
+/* Top-anchored, under the header band: the thumb zone (action buttons) stays
+   clear, so a fresh "Pick" tap never lands on the toast. Theme-native colours
+   (the old inverted look read as "ignores dark mode"). */
 .undo-toast {
   position: fixed;
   left: 50%;
-  bottom: calc(108px + env(safe-area-inset-bottom));
+  top: calc(56px + env(safe-area-inset-top));
   transform: translateX(-50%);
   width: min(92vw, 380px);
-  background: var(--ink);
-  color: var(--bg);
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--line);
   border-radius: 16px;
   padding: 8px 8px 8px 16px;
   z-index: 68; /* above the celebration overlay: undo must dismiss it */
   box-shadow: var(--shadow-lift);
-  animation: note-in .3s var(--spring);
+  animation: toast-down .3s var(--spring);
 }
+@keyframes toast-down { from { opacity: 0; transform: translate(-50%, -10px); } }
 .undo-row { display: flex; align-items: center; gap: 10px; }
 .undo-text {
   flex: 1;
@@ -781,25 +787,21 @@ body.quaking > .actions {
   white-space: nowrap;
 }
 .undo-btn {
-  background: rgba(255,255,255,.16);
-  color: inherit;
+  background: var(--accent);
+  color: var(--accent-ink);
   font-weight: 800;
   border-radius: 12px;
   padding: 12px 18px;
   font-size: 14px;
   flex-shrink: 0;
 }
-@media (prefers-color-scheme: dark) {
-  .undo-toast { background: #f1f2f5; color: #1f2430; }
-  .undo-btn { background: rgba(31,36,48,.1); }
-}
-.undo-btn kbd { font: inherit; opacity: .6; }
+.undo-btn kbd { font: inherit; opacity: .7; }
 .rule-chip {
   margin-top: 8px;
   width: 100%;
   text-align: left;
-  background: rgba(52, 211, 153, .18);
-  color: var(--accent-bright);
+  background: var(--accent-bg);
+  color: var(--accent);
   border-radius: 12px;
   padding: 10px 12px;
   font-size: 13px;
@@ -808,12 +810,7 @@ body.quaking > .actions {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.rule-chip.saved { background: rgba(52,211,153,.32); }
-@media (prefers-color-scheme: dark) {
-  /* the toast stays light in dark mode; bright teal on it is ~1.7:1 */
-  .rule-chip { color: #157f3d; background: rgba(21, 127, 61, .14); }
-  .rule-chip.saved { background: rgba(21, 127, 61, .24); }
-}
+.rule-chip.saved { background: color-mix(in srgb, var(--accent) 28%, var(--card)); }
 
 /* ---------- accounts filter ---------- */
 .acct-row {
@@ -913,6 +910,7 @@ body.quaking > .actions {
   min-height: 44px;
   padding: 10px 14px;
   font: inherit;
+  font-size: 16px; /* iOS zooms the page into any focused field under 16px */
   color: var(--ink);
   background: var(--bg);
   border: 1px solid var(--line);
@@ -1011,6 +1009,7 @@ body.quaking > .actions {
 .field-input {
   width: 100%;
   font: inherit;
+  font-size: 16px; /* iOS zooms the page into any focused field under 16px */
   color: var(--ink);
   background: var(--bg);
   border: 1px solid var(--line);
@@ -1102,16 +1101,20 @@ body.quaking > .actions {
 
 /* ---------- onboarding wizard ---------- */
 
+/* Phones: sized to the VISUAL viewport (--vv-h/--vv-top, kept current by app.js),
+   not 100dvh — iOS does not shrink the layout viewport for the keyboard, so a
+   dvh-tall dialog kept its footer (Continue) under the keys. */
 dialog.onboard {
   margin: 0;
   border: 0;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   background: var(--card);
   color: var(--ink);
+  top: var(--vv-top, 0px);
   width: 100dvw;
-  height: 100dvh;
+  height: var(--vv-h, 100dvh);
   max-width: 100dvw;
-  max-height: 100dvh;
+  max-height: var(--vv-h, 100dvh);
   border-radius: 0;
   display: flex;
   flex-direction: column;
@@ -1124,6 +1127,7 @@ dialog.onboard:not([open]) { display: none; }
   dialog.onboard {
     width: 100%;
     max-width: 420px;
+    top: 0;
     height: auto;
     max-height: min(88dvh, 640px);
     margin: auto;
@@ -1510,6 +1514,52 @@ dialog.onboard:not([open]) { display: none; }
   text-align: center;
 }
 .upgrade-banner:active { transform: scale(.97); }
+
+/* "Add to Home Screen" hint — browser tabs only, once per device */
+.install-banner {
+  display: flex;
+  align-items: center;
+  margin: 6px auto 0;
+  width: fit-content;
+  max-width: 92vw;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--card));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 999px;
+  padding: 0 2px 0 6px;
+}
+.install-banner button { padding: 8px 8px; min-height: 36px; }
+.install-banner button:active { transform: scale(.97); }
+#installDismiss { padding: 8px 12px; opacity: .7; }
+.install-pop {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(92vw, 360px);
+  height: fit-content;
+  background: var(--card);
+  color: var(--ink); /* UA [popover] forces CanvasText */
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lift);
+  padding: 18px 20px 16px;
+}
+.install-pop::backdrop { background: rgba(0, 0, 0, .35); }
+.install-title { font-size: 17px; font-weight: 800; margin-bottom: 10px; }
+.install-pop .ob-steps { margin-bottom: 8px; }
+.install-pop b { color: var(--ink); }
+.install-ok {
+  display: block;
+  width: 100%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 800;
+  border-radius: 14px;
+  padding: 12px;
+  min-height: 44px;
+}
 
 /* ==========================================================================
    fast category pickers (pk-*) — engine: public/lib/pickerui.js

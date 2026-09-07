@@ -3,7 +3,7 @@
 <head>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self'; manifest-src 'self'; connect-src 'self' https://api.lunchmoney.dev https://openrouter.ai https://dopo-music.artems.net; base-uri 'self'; form-action 'none'; object-src 'none'">
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
 <meta name="theme-color" content="#2a6b64">
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="icon" href="./icon.svg" type="image/svg+xml">
@@ -44,6 +44,19 @@
 <div class="stale-banner" id="staleBanner" hidden></div>
 <button class="stuck-banner" id="stuckBanner" type="button" hidden></button>
 <button class="upgrade-banner" id="upgradeBanner" type="button" hidden></button>
+<div class="install-banner" id="installBanner" hidden>
+  <button id="installBtn" type="button">📲 Add dopo to your Home Screen</button>
+  <button id="installDismiss" type="button" aria-label="Not now">✕</button>
+</div>
+<div class="install-pop" id="installPop" popover>
+  <div class="install-title">Install dopo</div>
+  <ol class="ob-steps">
+    <li>Tap <b>Share</b> in the browser toolbar — the square with an arrow.</li>
+    <li>Choose <b>Add to Home Screen</b>.</li>
+    <li>Open dopo from your Home Screen. The installed app has its own storage, so paste your token once more there.</li>
+  </ol>
+  <button type="button" class="install-ok" popovertarget="installPop" popovertargetaction="hide">Got it</button>
+</div>
 
 <main class="stage" id="stage">
   <div class="stack" id="stack" aria-live="polite"></div>
@@ -240,6 +253,17 @@
 
   <div class="onboard-body">
 
+    <section class="onboard-step" data-step="install" hidden>
+      <h2 class="ob-title" id="obTitleInstall" tabindex="-1">Install dopo first?</h2>
+      <p>dopo works best from your Home Screen: full screen, its own icon, and storage that
+        Safari won't clear after a week away.</p>
+      <p>The installed app keeps its own storage, separate from this Safari tab — so setting up
+        there means setting up <b>once</b>. Setting up here first means pasting your token again
+        after you install.</p>
+      <p class="ob-sub">Tap <b>Show me how</b> for the three steps, then open dopo from your Home Screen
+        and continue there.</p>
+    </section>
+
     <section class="onboard-step" data-step="welcome">
       <h2 class="ob-title" id="obTitleWelcome" tabindex="-1">Welcome to dopo</h2>
       <p>dopo shows you your unreviewed Lunch Money transactions one at a time, so you can
@@ -260,7 +284,7 @@
       <div class="field">
         <label class="field-label" for="obLmInput">Lunch Money API token</label>
         <div class="field-input-row">
-          <input class="field-input" id="obLmInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste token" aria-describedby="obLmHint obLmError">
+          <input class="field-input" id="obLmInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go" placeholder="Paste token" aria-describedby="obLmHint obLmError">
           <button type="button" class="field-show" id="obLmShow" aria-pressed="false">Show</button>
         </div>
         <div class="field-hint" id="obLmHint" role="status" hidden></div>
@@ -279,7 +303,7 @@
         <div class="field">
           <label class="field-label" for="obOrInput">OpenRouter API key</label>
           <div class="field-input-row">
-            <input class="field-input" id="obOrInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste key" aria-describedby="obOrHint obOrError">
+            <input class="field-input" id="obOrInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go" placeholder="Paste key" aria-describedby="obOrHint obOrError">
             <button type="button" class="field-show" id="obOrShow" aria-pressed="false">Show</button>
           </div>
           <div class="field-hint" id="obOrHint" role="status" hidden></div>

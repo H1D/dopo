@@ -9,8 +9,8 @@
  * `done` so the gesture legend on `done` can describe the picker the user chose.
  */
 
-/** @typedef {"welcome"|"lm"|"or"|"tune"|"picker"|"done"} StepId */
-export const STEP_IDS = /** @type {const} */ (["welcome", "lm", "or", "tune", "picker", "done"]);
+/** @typedef {"install"|"welcome"|"lm"|"or"|"tune"|"picker"|"done"} StepId */
+export const STEP_IDS = /** @type {const} */ (["install", "welcome", "lm", "or", "tune", "picker", "done"]);
 
 /**
  * @param {unknown} v
@@ -23,18 +23,23 @@ export function parseStep(v) {
 }
 
 /**
- * The step sequence for a session. First-run is always all five steps; the
- * returning path (Forget tokens) skips straight to re-entering credentials —
- * `or` only reappears when a shared free tier exists, because the user may
- * have had their own key before and must not be silently defaulted onto the
- * shared one. The returning path also skips `picker`: the choice is already made
- * and survives Forget tokens (it is a device preference, not a credential).
- * @param {{returning?: boolean, hasFreeTier?: boolean}} o
+ * The step sequence for a session. First-run is all six steps, led by `install`
+ * when `offerInstall` is set (an iOS browser tab: the Home Screen app has its own
+ * storage, so setting up there means setting up ONCE — the step says so before
+ * any token is pasted). The returning path (Forget tokens) skips straight to
+ * re-entering credentials — `or` only reappears when a shared free tier exists,
+ * because the user may have had their own key before and must not be silently
+ * defaulted onto the shared one. The returning path also skips `picker` and
+ * `install`: the choice is already made and survives Forget tokens (it is a
+ * device preference, not a credential), and the install pitch is a first-visit thing.
+ * @param {{returning?: boolean, hasFreeTier?: boolean, offerInstall?: boolean}} o
  * @returns {StepId[]}
  */
 export function stepsFor(o) {
   if (o.returning) return o.hasFreeTier ? ["lm", "or"] : ["lm"];
-  return ["welcome", "lm", "or", "tune", "picker", "done"];
+  /** @type {StepId[]} */
+  const steps = ["welcome", "lm", "or", "tune", "picker", "done"];
+  return o.offerInstall ? ["install", ...steps] : steps;
 }
 
 /**
@@ -140,6 +145,12 @@ export function canAdvance(a) {
   const { stepId, steps, field, saved, choice, returning } = a;
   const showBack = steps.indexOf(stepId) > 0;
   const primary = continueLabel(steps, stepId, returning);
+
+  // install: the primary opens the Add-to-Home-Screen steps and does NOT advance
+  // (app.js special-cases it); the secondary is the way forward in this tab.
+  if (stepId === "install") {
+    return { canContinue: true, primary: "Show me how", secondary: "Set up here anyway", showBack, checkFirst: false };
+  }
 
   if (stepId === "welcome") {
     return { canContinue: true, primary: "Connect Lunch Money", secondary: null, showBack, checkFirst: false };

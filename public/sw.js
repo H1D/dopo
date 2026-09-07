@@ -1,14 +1,25 @@
 "use strict";
 /*
- * dopo service worker — static app. The rules below are safe both for a plain
- * static host and for an origin behind an auth proxy (e.g. Cloudflare Access),
- * which is why navigations are passed through untouched.
+ * dopo service worker — static app. The rules below are safe for a plain
+ * static host and do not break behind an auth proxy (e.g. Cloudflare Access):
+ * the cache only ever holds verified same-origin assets, and once a version is
+ * cached the origin is contacted only by the browser's own sw.js update check
+ * — behind Access an expired session then pins the app to its cached version
+ * (LM/OpenRouter traffic never touches the origin) until a login happens
+ * elsewhere; nothing poisonous can be cached.
  *
  * Hard rules (each has bitten an Access-behind-SW app before):
- * - Navigations: return the network/preload response UNCHANGED, including
- *   opaqueredirect / status-0 (nav fetches use redirect mode "manual"; the
- *   browser follows the Access→IdP chain natively). The offline fallback is
- *   served ONLY when the fetch REJECTS — never based on status/ok/type.
+ * - The app shell (index.html) is CACHE-FIRST from the CURRENT version's cache,
+ *   exactly like app.js/app.css next to it. Network-first HTML + cache-first
+ *   assets is a version skew machine: while a new SW sits waiting, a reload
+ *   gets the NEW markup styled by the OLD stylesheet (a wizard with no styles,
+ *   seen in the wild). A version now lands as a whole, when the next SW
+ *   activates — the page's "New version" toast drives that.
+ * - Navigations that miss the cache return the network response UNCHANGED,
+ *   including opaqueredirect / status-0 (nav fetches use redirect mode
+ *   "manual"; the browser follows an Access→IdP chain natively). The offline
+ *   fallback is served ONLY when the fetch REJECTS — never based on
+ *   status/ok/type.
  * - Install fetches with {redirect:"follow", cache:"reload"} and rejects
  *   anything that isn't a SAME-ORIGIN 200 with a sane content-type — an Access
  *   login chain ends off-origin and fails install; a login page (text/html)
@@ -66,6 +77,23 @@ const PRECACHE = [
 const OFFLINE_PATH = scoped("offline.html");
 const PRECACHE_PATHS = new Set(PRECACHE.map(scoped));
 
+/**
+ * The precached shell a navigation pathname maps to, or null. Hosts that
+ * canonicalize .html URLs mean users navigate to /, not /index.html — accept
+ * both spellings (and a trailing slash).
+ * @param {string} pathname
+ * @returns {string|null}
+ */
+function shellFor(pathname) {
+  const root = scoped("./");
+  let path = pathname;
+  if (path.length > root.length && path.endsWith("/")) path = path.slice(0, -1);
+  if (path === root || path + "/" === root || path === scoped("index.html") || path === scoped("index")) {
+    return scoped("index.html");
+  }
+  return null;
+}
+
 /** 200-only + content-type sanity: reject login HTML masquerading as assets. */
 function contentTypeOk(path, res) {
   const ct = (res.headers.get("content-type") || "").toLowerCase();
@@ -76,6 +104,21 @@ function contentTypeOk(path, res) {
   if (path.endsWith(".svg")) return ct.includes("image/svg");
   if (path.endsWith(".png")) return ct.includes("image/png");
   return !ct.includes("text/html"); // unknown extension: anything but a login page
+}
+
+/**
+ * A response that arrived via redirect (Workers Assets 307s /index.html to /)
+ * keeps `redirected: true`, and the Cache API preserves that. Answering a
+ * NAVIGATION (redirect mode "manual") with such a response is a network error
+ * by spec — Chrome shows ERR_FAILED for every page load. Re-wrap the body into a
+ * plain 200 so the cached shell is usable for any request mode.
+ * @param {Response} res  a verified same-origin 200
+ * @returns {Promise<Response>}
+ */
+async function cleanRedirect(res) {
+  if (!res.redirected) return res;
+  const body = await res.arrayBuffer();
+  return new Response(body, { status: 200, statusText: "OK", headers: res.headers });
 }
 
 self.addEventListener("install", (event) => {
@@ -103,7 +146,7 @@ self.addEventListener("install", (event) => {
       }
       // Key by the REQUESTED path (url), not the canonical res.url, so cache
       // lookups by precache path keep working on every host flavor.
-      await cache.put(url, res);
+      await cache.put(url, await cleanRedirect(res));
     }));
     // ANY miss above rejects waitUntil -> the whole install fails atomically;
     // the update lands on a later (authenticated) visit instead.
@@ -112,8 +155,10 @@ self.addEventListener("install", (event) => {
 
 self.addEventListener("activate", (event) => {
   event.waitUntil((async () => {
+    // Navigation preload is deliberately OFF: the shell is answered from the
+    // cache, so a parallel network fetch per navigation would only cost data.
     if (self.registration.navigationPreload) {
-      try { await self.registration.navigationPreload.enable(); } catch { /* optional */ }
+      try { await self.registration.navigationPreload.disable(); } catch { /* optional */ }
     }
     // Drop stale VERSIONED caches before claiming clients — and ONLY those.
     // The origin's Cache Storage also holds two persistent caches this purge
@@ -139,26 +184,22 @@ self.addEventListener("fetch", (event) => {
 
   if (req.mode === "navigate") {
     event.respondWith((async () => {
+      const fromCache = (p) => caches.match(p, { cacheName: CACHE }).catch(() => undefined);
+      // App shell, CACHE-FIRST from THIS version's cache: the markup must always
+      // be the one app.js/app.css (served from the same cache) were written for.
+      // Keyed by the REQUEST pathname, never the response.
+      const shell = shellFor(url.pathname);
+      const cachedShell = shell ? await fromCache(shell) : undefined;
+      if (cachedShell) return cachedShell;
       try {
         // Return whatever resolves, UNCHANGED — opaqueredirect/status-0 included.
         // No status/ok/type inspection here, ever: an Access redirect must reach
         // the browser so it can follow the IdP chain natively.
-        return (await event.preloadResponse) ?? (await fetch(req));
+        return await fetch(req);
       } catch {
-        // EXCEPTION-ONLY fallback: the fetch itself rejected (truly offline).
-        // Map the REQUEST pathname (never the response) to a cached shell so the
-        // app still boots offline; offline.html stays the last resort. Hosts
-        // that canonicalize .html URLs mean users navigate to /, not /index.html
-        // — accept both spellings (and a trailing slash).
-        const root = scoped("./");
-        let path = url.pathname;
-        if (path.length > root.length && path.endsWith("/")) path = path.slice(0, -1);
-        let shell;
-        if (path === root || path + "/" === root || path === scoped("index.html") || path === scoped("index")) {
-          shell = scoped("index.html");
-        }
-        const fromCache = (p) => caches.match(p, { cacheName: CACHE }).catch(() => undefined);
-        const cached = (shell && (await fromCache(shell))) || (await fromCache(OFFLINE_PATH));
+        // EXCEPTION-ONLY fallback: the fetch itself rejected (truly offline) and
+        // no shell was cached for this path; offline.html is the last resort.
+        const cached = await fromCache(OFFLINE_PATH);
         return cached || Response.error();
       }
     })());
@@ -184,7 +225,7 @@ self.addEventListener("fetch", (event) => {
       if (res.status === 200 &&
           (!res.url || new URL(res.url).origin === self.location.origin) &&
           contentTypeOk(url.pathname, res)) {
-        await cache.put(url.pathname, res.clone());
+        await cache.put(url.pathname, await cleanRedirect(res.clone()));
       }
       return res;
     })());
