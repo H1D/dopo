@@ -7,6 +7,17 @@ you stay the judge. No key yet? A shared free tier gets you started (see [What i
 
 **Use it now: [dopo.artems.net](https://dopo.artems.net)** — no signup; a short setup walks you through it.
 
+## See it
+
+<!--
+GitHub renders an inline video player only for files uploaded through its own web UI (the URL
+looks like https://github.com/user-attachments/assets/<uuid>). Committed .mp4 files and raw.githubusercontent.com
+links render as plain links, not players. To fill this in: open this file in the GitHub web editor,
+drag dopo.mp4 onto the line below, and GitHub inserts the URL. Keep the URL on its own line.
+-->
+
+https://github.com/user-attachments/assets/REPLACE-WITH-UPLOADED-VIDEO-ID
+
 There is no backend. The whole app is a folder of vanilla ES modules served as static files. Your
 Lunch Money token and OpenRouter key live in your browser's storage and are sent by your browser
 directly to `api.lunchmoney.dev` and `openrouter.ai` — nowhere else.
