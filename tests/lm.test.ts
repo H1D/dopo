@@ -63,9 +63,11 @@ describe("getState", () => {
     }
 
     // categories come back FLAT (leaves with group attached — the old /api/state shape)
-    expect(state.categories.map((c) => c.id)).toEqual([101, 102, 200]);
-    expect(state.categories[0]).toEqual({ id: 101, name: "🛒 Groceries", group: "🍎 Food" });
+    expect(state.categories.map((c) => c.id)).toEqual([101, 102, 200, 301, 302]);
+    expect(state.categories[0]).toEqual({ id: 101, name: "🛒 Groceries", group: "🍎 Food", is_income: false });
     expect(state.categories[2]!.group).toBeNull();
+    // is_income: the leaf's own flag, or inherited from an income group (302 has none of its own)
+    expect(state.categories.filter((c) => c.is_income).map((c) => c.id)).toEqual([301, 302]);
     expect(state.accounts.map((a) => a.key).sort()).toEqual(["m7", "p11"]);
     expect(state.accounts.find((a) => a.key === "p11")?.name).toBe("ABN AMRO Betaalrekening");
   });

@@ -65,6 +65,7 @@ export class LMError extends Error {
  * @property {string} name
  * @property {boolean} is_group
  * @property {number|null} group_id
+ * @property {boolean} [is_income]
  * @property {LMCategory[]} [children]
  */
 
@@ -84,6 +85,9 @@ export class LMError extends Error {
  * @property {number} id
  * @property {string} name
  * @property {string|null} group
+ * @property {boolean} [is_income]  Lunch Money's own flag (inherited from the group when
+ *   the leaf lacks it) — money going OUT never belongs in one of these. Absent on
+ *   snapshots saved before the flag was kept: no guard until the next fetch.
  */
 
 /**
@@ -159,9 +163,11 @@ export function leafCategories(cats) {
   const leaves = [];
   for (const c of cats) {
     if (c.is_group) {
-      for (const child of c.children ?? []) leaves.push({ id: child.id, name: child.name, group: c.name });
+      for (const child of c.children ?? []) {
+        leaves.push({ id: child.id, name: child.name, group: c.name, is_income: child.is_income === true || c.is_income === true });
+      }
     } else {
-      leaves.push({ id: c.id, name: c.name, group: null });
+      leaves.push({ id: c.id, name: c.name, group: null, is_income: c.is_income === true });
     }
   }
   return leaves;

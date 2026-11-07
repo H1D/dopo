@@ -17,6 +17,7 @@ const CATS = [
   { id: 101, name: "🛒 Groceries", group: "🍎 Food" },
   { id: 102, name: "☕ Coffee & Snacks", group: "🍎 Food" },
   { id: 200, name: "🚆 Transport", group: null },
+  { id: 301, name: "💼 Salary", group: "💰 Income", is_income: true },
 ];
 
 let mock: MockFetch;
@@ -111,6 +112,32 @@ describe("classifyBatch — pass-1 request shaping", () => {
     const out = await classifyBatch("k", CATS, [txn(1), txn(2)]);
     expect(out[0]).toEqual({ id: 1, category_id: null, confidence: 1, reasoning: "made-up category" });
     expect(out[1]).toEqual({ id: 2, category_id: null, confidence: 0, reasoning: "model returned no suggestion" });
+  });
+
+  test("an income category on money going OUT is discarded; on money coming in it stands", async () => {
+    mock = new MockFetch()
+      .route((url) => {
+        if (!url.includes("/chat/completions")) return null;
+        return json({
+          choices: [{ message: { content: JSON.stringify({ suggestions: [
+            { id: 1, category_id: 301, confidence: 0.95, reasoning: "income received for a booking" },
+            { id: 2, category_id: 301, confidence: 0.95, reasoning: "salary" },
+          ] }) } }],
+        });
+      })
+      .install();
+    const out = await classifyBatch("k", CATS, [{ ...txn(1), amount: "21.00" }, { ...txn(2), amount: "-2500.00" }]);
+    expect(out[0]).toEqual({ id: 1, category_id: null, confidence: 0, reasoning: "model called money going out income; suggestion discarded" });
+    expect(out[1]).toMatchObject({ id: 2, category_id: 301, confidence: 0.95 });
+  });
+
+  test("the prompt spells the direction out per row and forbids income on a payment", async () => {
+    mock = new MockFetch().route((url, init) => (url.includes("/chat/completions") ? pass1Response(JSON.parse(String(init?.body))) : null)).install();
+    await classifyBatch("k", CATS, [{ ...txn(1), amount: "21.00" }, { ...txn(2), amount: "-5.00" }]);
+    const prompt = (mock.calls[0]!.body as { messages: { content: string }[] }).messages[0]!.content;
+    expect(prompt).toContain('"direction": "out"');
+    expect(prompt).toContain('"direction": "in"');
+    expect(prompt).toContain("NEVER income");
   });
 
   test("merchant echo mismatch discards the suggestion (row-swap guard)", async () => {

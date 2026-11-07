@@ -6,7 +6,7 @@
  */
 
 import { getState, bucketOf } from "./lib/lm.js";
-import { classifyTransactions, webCheckMerchant } from "./lib/classify.js";
+import { classifyTransactions, webCheckMerchant, isOutflow } from "./lib/classify.js";
 import { matchRule, ruleSuggestion } from "./lib/rules.js";
 import { cleanMerchant } from "./lib/clean.js";
 import { CONFIDENT_AT } from "./lib/card.js";
@@ -136,13 +136,16 @@ export async function assembleFromSnapshot(rules) {
  * Cache keys: `txn:<id>` (pass 1), `m:<merchant key>` (pass 2 / web).
  * @param {DeckTxn[]} txns
  * @param {Rule[]} rules
- * @param {Pick<Category, "id">[]} [categories]  assignable leaves (lm.js leafCategories)
+ * @param {Pick<Category, "id"|"is_income">[]} [categories]  assignable leaves (lm.js leafCategories)
  * @returns {Promise<void>}
  */
 export async function attachSuggestions(txns, rules, categories) {
   const leafIds = categories ? new Set(categories.map((c) => c.id)) : null;
+  const incomeIds = new Set((categories ?? []).filter((c) => c.is_income).map((c) => c.id));
   /** @param {number} id */
   const isLeaf = (id) => !leafIds || leafIds.has(id);
+  /** @param {number} id */
+  const isIncome = (id) => incomeIds.has(id);
   /** @type {Map<string, unknown>} */
   let cache = new Map();
   try {
@@ -173,10 +176,10 @@ export async function attachSuggestions(txns, rules, categories) {
     // different merchant (the payee changed since — a Lunch Money rename, a Plaid
     // pending→posted rewrite) is ignored rather than read as "AI agrees" on a card
     // that now says something else entirely; pass 1 simply asks again.
-    if (isSuggestion(ai) && verdictFits(ai, mk)) { t.aiChecked = true; t.suggestion = mergeAi(t, fromCache(ai, "ai"), isLeaf); }
+    if (isSuggestion(ai) && verdictFits(ai, mk)) { t.aiChecked = true; t.suggestion = mergeAi(t, fromCache(ai, "ai"), isLeaf, isIncome); }
     if (isSuggestion(web) && web.suggested_category_id != null) {
       t.aiChecked = true;
-      t.suggestion = mergeAi(t, fromCache(web, "web"), isLeaf);
+      t.suggestion = mergeAi(t, fromCache(web, "web"), isLeaf, isIncome);
     }
   }
 }
@@ -218,15 +221,23 @@ function lmSuggestion(categoryId, verdict) {
  *     second opinion: it only takes the card when it is CONFIDENT and DISAGREES.
  *     Agreement or an unsure verdict keeps the held category, with the reasoning
  *     saying which — the swipe-right confirm stays a one-move card.
+ *   - an income category on money going OUT is never taken, at any confidence:
+ *     the verdict is read as "no idea" (so a held category stays, a bare card
+ *     stays bare). The classifier already nulls these for pass 1; this covers
+ *     the per-merchant web pass and verdicts cached before the guard existed.
  * @param {DeckTxn} t
  * @param {UISuggestion} next  source "ai" | "web"
  * @param {(id: number) => boolean} [isLeaf]  trust test for t.category_id (default: trust)
+ * @param {(id: number) => boolean} [isIncome]  Lunch Money's is_income flag by id (default: none)
  * @returns {UISuggestion}
  */
-export function mergeAi(t, next, isLeaf = () => true) {
+export function mergeAi(t, next, isLeaf = () => true, isIncome = () => false) {
   const cur = t.suggestion;
   if (cur?.source === "rule") return cur;
   if (cur?.source === "web" && next.source === "ai") return cur;
+  if (next.suggested_category_id != null && isIncome(next.suggested_category_id) && isOutflow(t.amount)) {
+    next = { ...next, suggested_category_id: null, confidence: 0, reasoning: "AI called money going out income — ignored" };
+  }
   const held = t.category_id != null && isLeaf(t.category_id) ? t.category_id : null;
   if (held !== null) {
     if (next.suggested_category_id === held) return lmSuggestion(held, "agrees");
