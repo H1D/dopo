@@ -63,6 +63,7 @@ export class ORError extends Error {
  * @property {number} id
  * @property {string} name
  * @property {string|null} group
+ * @property {boolean} [is_income]
  */
 
 /**
@@ -236,6 +237,30 @@ function txnForLLM(t) {
   };
 }
 
+/**
+ * Lunch Money sign convention: positive = money OUT. Anything unparsable is
+ * treated as an outflow (the common case) so the income guard still applies.
+ * @param {unknown} amount
+ * @returns {boolean}
+ */
+export function isOutflow(amount) {
+  const n = Number(amount);
+  return !(n < 0);
+}
+
+/**
+ * An outflow in an income category is a lie no matter how confident the model
+ * sounded — a studio booking is not "income from a booking". Null it so the row
+ * falls through (pass 2 / a bare card) rather than caching the mistake.
+ * @param {{category_id: number|null}} s  the model's pick
+ * @param {unknown} amount
+ * @param {Set<number>} incomeIds
+ * @returns {boolean}  true when the pick must be discarded
+ */
+function incomeOnOutflow(s, amount, incomeIds) {
+  return s.category_id !== null && incomeIds.has(s.category_id) && isOutflow(amount);
+}
+
 /** @param {Suggestion} s @returns {AppSuggestion} */
 function toAppSuggestion(s) {
   return { id: s.id, suggested_category_id: s.category_id, confidence: s.confidence, reasoning: s.reasoning };
@@ -272,13 +297,13 @@ export async function classifyTransactions(apiKey, txns, categories, opts = {}) 
  * @returns {Promise<Suggestion[]>}
  */
 async function classifyChunk(apiKey, model, categories, txns) {
-  const prompt = `You categorize personal bank transactions for a household in the Netherlands (bank: ABN AMRO, currency mostly EUR). Payee strings are often noisy: payment service providers (Mollie, Zettle, SumUp, CCV), IBANs, dossier numbers. The "merchant" field is a cleaned-up guess; "raw_payee" is the original string; "lookup" is a web search snippet about the merchant when available. Positive amounts are money going out (expenses), negative amounts are money coming in.
+  const prompt = `You categorize personal bank transactions for a household in the Netherlands (bank: ABN AMRO, currency mostly EUR). Payee strings are often noisy: payment service providers (Mollie, Zettle, SumUp, CCV), IBANs, dossier numbers. The "merchant" field is a cleaned-up guess; "raw_payee" is the original string; "lookup" is a web search snippet about the merchant when available. "direction" says which way the money went: "out" = the household PAID this (an expense — positive amount), "in" = the household RECEIVED this (negative amount). A payment the household made is NEVER income, whatever the payee is called: a booking, an invoice or a ticket the household paid for is an expense in its own category. Only "in" transactions can be income (salary, refunds, money sent by other people).
 
 Categories (id: group / name):
 ${categoryList(categories)}
 
 Transactions:
-${JSON.stringify(txns, null, 1)}
+${JSON.stringify(txns.map((t) => ({ ...t, direction: isOutflow(t.amount) ? "out" : "in" })), null, 1)}
 
 For EVERY transaction return the best category. Use null for category_id only if you genuinely cannot tell. In "merchant", copy that transaction's merchant field EXACTLY — it ties your answer to the right row. Respond with ONLY a JSON object of this exact shape:
 {"suggestions": [{"id": <txn id>, "merchant": "<exact copy of that transaction's merchant field>", "category_id": <category id or null>, "confidence": <0..1>, "reasoning": "<one short sentence>"}]}`;
@@ -294,12 +319,16 @@ For EVERY transaction return the best category. Use null for category_id only if
   const suggestions = Array.isArray(parsed.suggestions) ? parsed.suggestions : [];
 
   const validIds = new Set(categories.map((c) => c.id));
+  const incomeIds = new Set(categories.filter((c) => c.is_income).map((c) => c.id));
   const byId = new Map(suggestions.filter((s) => s && typeof s.id === "number").map((s) => [s.id, s]));
   return txns.map((t) => {
     const s = byId.get(t.id);
     if (!s) return { id: t.id, category_id: null, confidence: 0, reasoning: "model returned no suggestion" };
     if (!echoMatches(s, t)) {
       return { id: t.id, category_id: null, confidence: 0, reasoning: "model mixed up rows in the batch; suggestion discarded" };
+    }
+    if (incomeOnOutflow(s, t.amount, incomeIds)) {
+      return { id: t.id, category_id: null, confidence: 0, reasoning: "model called money going out income; suggestion discarded" };
     }
     return {
       id: t.id,

@@ -66,7 +66,7 @@ describe("assembleState — snapshot persistence", () => {
     // raw: no decoration leaked into the snapshot
     expect("merchant" in snap!.transactions[0]!).toBe(false);
     expect("suggestion" in snap!.transactions[0]!).toBe(false);
-    expect(snap!.categories.map((c) => c.id)).toEqual([101, 102, 200]);
+    expect(snap!.categories.map((c) => c.id)).toEqual([101, 102, 200, 301, 302]);
     expect(snap!.accounts.length).toBe(2);
     expect(typeof snap!.fetchedAt).toBe("number");
     expect(snap!.truncated).toBe(false);
@@ -141,6 +141,20 @@ describe("mergeAi — a model verdict against what the card already holds", () =
     const stale = txn({ category_id: 999, suggestion: null }); // archived / group id: attach gave it no lm suggestion
     expect(mergeAi(stale, ai(101, 0.2), (id) => id !== 999)).toMatchObject({ source: "ai", suggested_category_id: 101 });
     expect(mergeAi(stale, ai(999, 0.9), (id) => id !== 999)).toMatchObject({ source: "ai" }); // not re-dressed as "lm"
+  });
+
+  test("an income category on money going out is read as 'no idea': a held category stays, a bare card stays bare, money coming in is untouched", () => {
+    const isIncome = (id: number) => id === 301;
+    const held = txn({ category_id: 102, suggestion: lm }); // amount "9.99" = out
+    const kept = mergeAi(held, ai(301, 0.99), undefined, isIncome);
+    expect(kept).toMatchObject({ source: "lm", suggested_category_id: 102, confidence: 1 });
+    expect(kept.reasoning).toContain("wasn't sure");
+    expect(mergeAi(held, web(301, 0.99), undefined, isIncome)).toMatchObject({ source: "lm", suggested_category_id: 102 });
+    const bare = mergeAi(txn(), ai(301, 0.99), undefined, isIncome);
+    expect(bare).toMatchObject({ source: "ai", suggested_category_id: null, confidence: 0 });
+    expect(bare.reasoning).toContain("ignored");
+    expect(mergeAi(txn({ amount: "-2500.00" }), ai(301, 0.99), undefined, isIncome)).toMatchObject({ source: "ai", suggested_category_id: 301 });
+    expect(mergeAi(held, ai(301, 0.99))).toMatchObject({ source: "ai", suggested_category_id: 301 }); // no flag known: no guard
   });
 
   test("askable / wantsAi: bare or lm-only cards the model hasn't seen, gated per bucket for the automatic pass", () => {

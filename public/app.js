@@ -434,6 +434,8 @@ function main() {
   /** Trust test for a category id Lunch Money holds on a row: only assignable leaves
    *  we know may ride along as a suggestion. @param {number} id */
   const isLeafId = (id) => catById.has(id);
+  /** @param {number} id */
+  const isIncomeId = (id) => catById.get(id)?.is_income === true;
   /** @param {number|number[]} p */
   const haptic = (p) => { try { navigator.vibrate?.(p); } catch { /* additive only */ } };
   /** @param {number} v @param {number} lo @param {number} hi */
@@ -653,7 +655,7 @@ function main() {
       t.aiChecked = true;
       // rules/web win over a late pass-1 result; a category Lunch Money already
       // holds only yields to a confident disagreement (data.js mergeAi)
-      t.suggestion = mergeAi(t, s, isLeafId);
+      t.suggestion = mergeAi(t, s, isLeafId, isIncomeId);
     }
     reconcile();
     maybeWebCheck();
@@ -734,7 +736,7 @@ function main() {
       for (const t of allTxns) {
         if (merchantKeyOf(t.merchant) !== key) continue;
         t.aiChecked = true;
-        t.suggestion = mergeAi(t, sug, isLeafId); // rules stay on top; a held LM category only yields to a confident disagreement
+        t.suggestion = mergeAi(t, sug, isLeafId, isIncomeId); // rules stay on top; a held LM category only yields to a confident disagreement
       }
       reconcile();
     } catch (e) {
